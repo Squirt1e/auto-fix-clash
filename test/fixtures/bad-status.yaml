@@ -1,0 +1,5 @@
+targets:
+  - name: GPT
+    probe:
+      url: https://chatgpt.com/backend-api/codex/responses
+      expectedStatus: [not-a-number]

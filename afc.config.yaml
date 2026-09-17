@@ -1,0 +1,54 @@
+# auto-fix-clash / afc 配置
+# 说明：省略本文件时程序会使用内置的 GPT/Codex 预设（与下面 targets 的内容一致）。
+# 查找顺序：--config <path> → ./afc.config.yaml → ~/.config/afc/config.yaml
+
+probe:
+  # 同时探测的节点数上限（限制对同一订阅同时打开的隧道数）。上限 4。
+  # 每个通道使用独立入站端口，因此通道之间不会互相干扰。
+  concurrency: 2
+  # 「完全没有 HTTP 响应」时的重试次数（避免瞬时失败被误判为死节点）。
+  retries: 1
+  # 判定性探测（当前节点、最终确认的候选）的单次请求超时。
+  timeoutMs: 15000
+  # 候选筛查阶段的超时：只用来快速排除不通的节点，越短恢复越快。
+  screenTimeoutMs: 5000
+  # mihomo 内核二进制路径；省略时自动发现（Clash Party / Clash Verge / PATH）。
+  # kernelPath: /Applications/Clash Party.app/Contents/Resources/sidecar/mihomo
+  # 运行时配置路径；省略时自动发现。
+  # runtimeConfigPath: ~/Library/Application Support/mihomo-party/work/config.yaml
+
+schedule:
+  # 计划任务的运行间隔（秒）。越小恢复越快，但探测流量与触发机场风控的概率越高。
+  intervalSeconds: 300
+
+targets:
+  - name: GPT
+    # 主判据：可用出口返回 405；被目标站点拒绝的出口（如香港）返回 403。
+    # 注意：不要用 https://chatgpt.com/ 首页做判据 —— 它对所有出口都返回
+    # Cloudflare JS 挑战 403，无法区分「可用」与「被拒绝」。
+    probe:
+      url: https://chatgpt.com/backend-api/codex/responses
+      expectedStatus: [405]
+      method: GET
+    # 附加判据：任一通过即视为该组端点通过。
+    extraProbes:
+      - url: https://api.openai.com/v1/models
+        expectedStatus: [401]
+        method: GET
+    # 出口信息（出口国家 / 落地 IP / 是否经由 WARP）。
+    geoProbe:
+      url: https://chatgpt.com/cdn-cgi/trace
+      format: cloudflare-trace
+    # 出口国家兜底策略（主判据始终是实测响应码）。
+    # countryAllow 留空数组表示不限制；countryDeny 命中即判不可用。
+    countryDeny: [HK, CN, MO, RU, IR, KP, CU, SY, AF, BY, VE, MM]
+    countryAllow: []
+
+  # 新增其它目标组的示例（不需要改代码）：
+  # - name: Youtube
+  #   probe:
+  #     url: https://www.youtube.com/generate_204
+  #     expectedStatus: [204]
+  #   geoProbe:
+  #     url: https://www.youtube.com/cdn-cgi/trace
+  #     format: cloudflare-trace

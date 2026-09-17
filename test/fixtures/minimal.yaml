@@ -1,0 +1,14 @@
+probe:
+  concurrency: 1
+  retries: 0
+  timeoutMs: 5000
+
+schedule:
+  intervalSeconds: 120
+
+targets:
+  - name: GPT
+    probe:
+      url: https://chatgpt.com/backend-api/codex/responses
+      expectedStatus: [405]
+      method: GET

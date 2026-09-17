@@ -1,0 +1,9 @@
+targets:
+  - name: GPT
+    probe:
+      url: https://example.com/
+      expectedStatus: [200]
+  - name: GPT
+    probe:
+      url: https://example.com/other
+      expectedStatus: [200]
