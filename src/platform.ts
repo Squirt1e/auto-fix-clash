@@ -113,10 +113,13 @@ export function clashPartyDataDirs(ctx: PlatformContext): string[] {
   const j = joinFor(ctx);
   if (ctx.platform === 'darwin') return [j(ctx.home, 'Library', 'Application Support', 'mihomo-party')];
   if (isWindows(ctx)) {
-    return [
+    // 环境变量缺失时（精简环境、CI）仍要给出一个可用的位置，否则候选集为空，
+    // clashPartyDataDir() 取 [0] 会变成 undefined。
+    const candidates = [
       appData(ctx) ? j(appData(ctx)!, 'mihomo-party') : undefined,
       localAppData(ctx) ? j(localAppData(ctx)!, 'mihomo-party') : undefined,
     ].filter((p): p is string => p !== undefined);
+    return candidates.length > 0 ? candidates : [j(ctx.home, 'AppData', 'Roaming', 'mihomo-party')];
   }
   return [j(xdgConfigHome(ctx), 'mihomo-party'), j(xdgDataHome(ctx), 'mihomo-party')];
 }
@@ -131,11 +134,14 @@ export function clashVergeDataDirs(ctx: PlatformContext): string[] {
   if (isWindows(ctx)) {
     const roaming = appData(ctx);
     const local = localAppData(ctx);
-    return [
+    const candidates = [
       roaming ? j(roaming, 'io.github.clash-verge-rev.clash-verge-rev') : undefined,
       local ? j(local, 'io.github.clash-verge-rev.clash-verge-rev') : undefined,
       roaming ? j(roaming, 'clash-verge') : undefined,
     ].filter((p): p is string => p !== undefined);
+    return candidates.length > 0
+      ? candidates
+      : [j(ctx.home, 'AppData', 'Roaming', 'io.github.clash-verge-rev.clash-verge-rev')];
   }
   return [
     j(xdgConfigHome(ctx), 'io.github.clash-verge-rev.clash-verge-rev'),
