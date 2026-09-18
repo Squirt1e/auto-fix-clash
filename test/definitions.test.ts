@@ -125,7 +125,8 @@ test('候选路径跟随基础路径自身的风格，不被 ctx 平台带偏', 
   try {
     const runtimeConfigPath = join(dir, 'work', 'config.yaml');
     const workDir = join(dir, 'work');
-    assert.equal(joinLike(workDir, 'profiles'), `${workDir}/profiles`);
+    // 期望值也要用宿主的 join：这条断言本身就是「跟随基础路径的风格」。
+    assert.equal(joinLike(workDir, 'profiles'), join(workDir, 'profiles'));
     const source = findNodeDefinitions(
       { runtimeConfigPath, neededNodeNames: ['日本 01'] },
       { platform: 'win32', home: 'C:\\Users\\tester', env: {} },
