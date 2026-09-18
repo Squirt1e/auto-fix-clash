@@ -1,5 +1,4 @@
-import { join } from 'node:path';
-import { afcStateDir, type PlatformContext } from '../platform.ts';
+import { afcStateDir, joinFor, type PlatformContext } from '../platform.ts';
 
 /** 交给系统调度器执行的东西（各平台用同一份参数）。 */
 export interface ScheduleOptions {
@@ -68,7 +67,9 @@ export function scheduleLogDir(ctx: PlatformContext): string {
 
 /** 计划任务的日志文件：主日志与错误日志。 */
 export function scheduleLogFiles(ctx: PlatformContext, dir = scheduleLogDir(ctx)): { out: string; err: string } {
-  return { out: join(dir, 'heal.log'), err: join(dir, 'heal.err.log') };
+  // 按目标平台拼：不能用宿主平台的 path.join，否则在别的平台上生成的定义文件路径会变形
+  const j = joinFor(ctx);
+  return { out: j(dir, 'heal.log'), err: j(dir, 'heal.err.log') };
 }
 
 // 间隔下限只有一处定义（配置校验也用它），这里只是转发

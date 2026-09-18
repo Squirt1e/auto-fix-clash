@@ -1,8 +1,7 @@
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { currentPlatform, type PlatformContext } from '../platform.ts';
+import { currentPlatform, joinFor, type PlatformContext } from '../platform.ts';
 import {
   SCHEDULE_MIN_INTERVAL_SECONDS,
   scheduleCliArgs,
@@ -23,16 +22,17 @@ export const SYSTEMD_UNIT = 'afc-heal';
 export const CRON_MARKER = '# auto-fix-clash: 代理组节点体检与修复（本行由 afc schedule 管理）';
 
 function unitDir(ctx: PlatformContext): string {
-  const base = ctx.env['XDG_CONFIG_HOME'] ?? join(ctx.home, '.config');
-  return join(base, 'systemd', 'user');
+  const j = joinFor(ctx);
+  const base = ctx.env['XDG_CONFIG_HOME'] ?? j(ctx.home, '.config');
+  return j(base, 'systemd', 'user');
 }
 
 export function servicePath(ctx: PlatformContext = currentPlatform()): string {
-  return join(unitDir(ctx), `${SYSTEMD_UNIT}.service`);
+  return joinFor(ctx)(unitDir(ctx), `${SYSTEMD_UNIT}.service`);
 }
 
 export function timerPath(ctx: PlatformContext = currentPlatform()): string {
-  return join(unitDir(ctx), `${SYSTEMD_UNIT}.timer`);
+  return joinFor(ctx)(unitDir(ctx), `${SYSTEMD_UNIT}.timer`);
 }
 
 /** 生成 systemd user service 单元（纯函数，便于测试）。 */

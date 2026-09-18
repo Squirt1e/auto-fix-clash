@@ -5,6 +5,7 @@ import { currentPlatform, type PlatformContext } from '../platform.ts';
 import {
   SCHEDULE_MIN_INTERVAL_SECONDS,
   scheduleLogDir,
+  scheduleLogFiles,
   type InstallResult,
   type ScheduleBackend,
   type ScheduleOptions,
@@ -71,7 +72,7 @@ export class CronBackend implements ScheduleBackend {
     if (!write.ok) {
       throw new Error(`写入 crontab 失败：${write.err.trim() || '未知错误'}`);
     }
-    const logPath = scheduleLogDir(this.ctx) + '/heal.log';
+    const logPath = scheduleLogFiles(this.ctx).out;
     return {
       backend: this.name,
       definitions: ['crontab'],
@@ -110,7 +111,7 @@ export class CronBackend implements ScheduleBackend {
       installed,
       loaded: installed,
       definitions: installed ? ['crontab'] : [],
-      logPath: scheduleLogDir(this.ctx) + '/heal.log',
+      logPath: scheduleLogFiles(this.ctx).out,
     };
     const line = text.split('\n').find((l) => l.includes('afc') && l.includes('fix'));
     const every = line ? /^\*\/(\d+)/.exec(line.trim()) : null;

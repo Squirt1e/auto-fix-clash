@@ -3,6 +3,7 @@ import { accessSync, constants, existsSync, readdirSync, readFileSync } from 'no
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
+  joinFor,
   clashPartyDataDirs,
   clashVergeDataDirs,
   currentPlatform,
@@ -203,20 +204,21 @@ export function runtimeConfigPathCandidates(
   explicit?: string,
   ctx: PlatformContext = currentPlatform(),
 ): string[] {
+  const j = joinFor(ctx);
   const paths: string[] = [];
   if (explicit) paths.push(explicit);
   for (const proc of listKernelProcesses(ctx)) {
-    if (proc.workDir) paths.push(join(proc.workDir, 'config.yaml'));
+    if (proc.workDir) paths.push(j(proc.workDir, 'config.yaml'));
   }
   // Clash Verge 系列把合并后的运行时配置放在数据目录下的 config.yaml
-  for (const dir of clashVergeDataDirs(ctx)) paths.push(join(dir, 'config.yaml'));
-  for (const dir of clashPartyDataDirs(ctx)) paths.push(join(dir, 'config.yaml'));
-  const partyWork = join(clashPartyDataDir(ctx), 'work');
-  paths.push(join(partyWork, 'config.yaml'));
+  for (const dir of clashVergeDataDirs(ctx)) paths.push(j(dir, 'config.yaml'));
+  for (const dir of clashPartyDataDirs(ctx)) paths.push(j(dir, 'config.yaml'));
+  const partyWork = j(clashPartyDataDir(ctx), 'work');
+  paths.push(j(partyWork, 'config.yaml'));
   // diffWorkDir 模式下配置位于 work/<profileId>/config.yaml
   try {
     for (const entry of readdirSync(partyWork, { withFileTypes: true })) {
-      if (entry.isDirectory()) paths.push(join(partyWork, entry.name, 'config.yaml'));
+      if (entry.isDirectory()) paths.push(j(partyWork, entry.name, 'config.yaml'));
     }
   } catch {
     // work 目录不存在时忽略
@@ -279,19 +281,20 @@ function scoreNames(names: string[], needed?: readonly string[]): number {
 }
 
 /** 订阅档案可能存放的位置（运行时配置所在目录及其上级的 profiles 子目录等）。 */
-function profileFileCandidates(runtimeConfigPaths: string[]): string[] {
+function profileFileCandidates(runtimeConfigPaths: string[], ctx: PlatformContext): string[] {
+  const j = joinFor(ctx);
   const dirs = new Set<string>();
   for (const path of runtimeConfigPaths) {
     const dir = dirname(path);
     dirs.add(dir);
     dirs.add(dirname(dir));
   }
-  dirs.add(clashPartyDataDir());
-  dirs.add(clashVergeDataDir());
+  dirs.add(clashPartyDataDir(ctx));
+  dirs.add(clashVergeDataDir(ctx));
 
   const files: string[] = [];
   for (const dir of dirs) {
-    for (const sub of [dir, join(dir, 'profiles'), join(dir, 'profile'), join(dir, 'subscriptions')]) {
+    for (const sub of [dir, j(dir, 'profiles'), j(dir, 'profile'), j(dir, 'subscriptions')]) {
       let entries;
       try {
         entries = readdirSync(sub, { withFileTypes: true });
@@ -301,7 +304,7 @@ function profileFileCandidates(runtimeConfigPaths: string[]): string[] {
       for (const entry of entries) {
         if (!entry.isFile()) continue;
         if (!/\.(ya?ml)$/i.test(entry.name)) continue;
-        files.push(join(sub, entry.name));
+        files.push(j(sub, entry.name));
       }
     }
   }
@@ -332,13 +335,14 @@ export class NodeDefinitionNotFoundError extends Error {
  */
 export function findNodeDefinitions(
   options: { runtimeConfigPath?: string; neededNodeNames?: readonly string[] } = {},
+  ctx: PlatformContext = currentPlatform(),
 ): NodeDefinitionSource {
   // 显式指定了运行时配置就只认它（外加订阅档案兜底）：
   // 否则机器上同时存在多个客户端时，会挑到另一个客户端的数据，用户无法预期。
   const explicitPath = options.runtimeConfigPath
     ? (isAbsolute(options.runtimeConfigPath) ? options.runtimeConfigPath : resolve(options.runtimeConfigPath))
     : undefined;
-  const runtimePaths = explicitPath ? [explicitPath] : runtimeConfigPathCandidates();
+  const runtimePaths = explicitPath ? [explicitPath] : runtimeConfigPathCandidates(undefined, ctx);
   const tried: string[] = [];
   let best: NodeDefinitionSource | undefined;
   let bestScore = -1;
@@ -370,7 +374,7 @@ export function findNodeDefinitions(
   for (const path of runtimePaths) consider(path, 'runtime-config');
   // 运行时配置里没有内联节点时（或重合度为 0），去订阅档案里找
   if (bestScore <= 0) {
-    for (const path of profileFileCandidates(runtimePaths)) consider(path, 'profile-file');
+    for (const path of profileFileCandidates(runtimePaths, ctx)) consider(path, 'profile-file');
   }
 
   if (!best || bestScore <= 0) throw new NodeDefinitionNotFoundError(tried, options.neededNodeNames);

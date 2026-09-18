@@ -1,7 +1,7 @@
 import { execFile, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { promisify } from 'node:util';
 import { MIN_SCHEDULE_INTERVAL_SECONDS } from '../config.ts';
 import { currentPlatform, type PlatformContext } from '../platform.ts';
@@ -18,19 +18,19 @@ const execFileAsync = promisify(execFile);
 export const LAUNCHD_LABEL = 'com.auto-fix-clash.heal';
 
 export function launchAgentsDir(): string {
-  return join(homedir(), 'Library', 'LaunchAgents');
+  return posix.join(homedir(), 'Library', 'LaunchAgents');
 }
 
 export function plistPath(): string {
-  return join(launchAgentsDir(), `${LAUNCHD_LABEL}.plist`);
+  return posix.join(launchAgentsDir(), `${LAUNCHD_LABEL}.plist`);
 }
 
 export function logDir(): string {
-  return join(homedir(), 'Library', 'Logs', 'afc');
+  return posix.join(homedir(), 'Library', 'Logs', 'afc');
 }
 
 export function logPath(): string {
-  return join(logDir(), 'heal.log');
+  return posix.join(logDir(), 'heal.log');
 }
 
 function xmlEscape(value: string): string {
@@ -78,9 +78,9 @@ ${argsXml}
   <key>RunAtLoad</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>${xmlEscape(join(options.logDir, 'heal.log'))}</string>
+  <string>${xmlEscape(posix.join(options.logDir, 'heal.log'))}</string>
   <key>StandardErrorPath</key>
-  <string>${xmlEscape(join(options.logDir, 'heal.err.log'))}</string>
+  <string>${xmlEscape(posix.join(options.logDir, 'heal.err.log'))}</string>
   <key>ProcessType</key>
   <string>Background</string>
 </dict>
