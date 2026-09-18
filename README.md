@@ -120,19 +120,3 @@ afc -v                    # 版本号
 正常。电脑睡眠期间不触发，唤醒后会补跑一次。
 
 **退出码**：`0` 成功　`2` 未找到可用节点　`3` 环境故障　`64` 用法错误
-
-## 从源码安装 / 开发
-
-```bash
-git clone https://github.com/Squirt1e/auto-fix-clash.git && cd auto-fix-clash
-pnpm install
-pnpm build
-pnpm add -g .         # 装成全局命令，改完代码立即生效
-```
-
-要求 Node.js ≥ 22.6（直接运行 TypeScript）。测试：`pnpm test`。
-
-> 改代码时注意：`pnpm afc <命令>` 直接跑源码；全局 `afc` 优先用 `dist/`，所以改完要 `pnpm build`。
-
-原理与取舍、被否决的方案、实测证据见：
-`openspec/changes/add-proxy-group-auto-heal/design.md`、`verification/README.md`。
