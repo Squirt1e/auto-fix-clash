@@ -1,11 +1,17 @@
 name: Publish to npm
 
-# 触发：推送 v* 标签（例如 v1.0.1）时自动发布；也可在 Actions 页面手动触发
+# 触发：推送 v* 标签（例如 v1.0.1）时自动发布
+# 也可在 Actions 页面手动触发：默认只做校验与打包，不真正发布
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只校验与打包，不发布（默认勾选）'
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -32,6 +38,14 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
 
+      - name: 检查 OIDC 环境可用
+        run: |
+          if [ -z "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
+            echo "::error::拿不到 OIDC 令牌地址，请确认本 workflow 声明了 id-token: write"
+            exit 1
+          fi
+          echo "OIDC 可用 ✓"
+
       # 防止 tag 与 package.json 版本不一致导致发错版本
       - name: 校验 tag 与 package.json 版本一致
         if: startsWith(github.ref, 'refs/tags/')
@@ -44,9 +58,29 @@ jobs:
             exit 1
           fi
 
+      # 预发布版本（如 1.0.1-rc.0）自动发到 next 标签，不会影响 latest
+      - name: 决定 dist-tag
+        id: dist
+        run: |
+          V="$(node -p "require('./package.json').version")"
+          if [[ "$V" == *-* ]]; then
+            echo "tag=next" >> "$GITHUB_OUTPUT"
+            echo "检测到预发布版本 $V → 发布到 next 标签（latest 不受影响）"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+            echo "正式版本 $V → 发布到 latest 标签"
+          fi
+
       # trusted publishing 要求 npm >= 11.5.1
       - run: npm install -g npm@latest
       - run: npm --version
 
+      # 手动触发且勾了 dry_run 时只打包，不发布
+      - name: 打包预演（不发布）
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        run: npm publish --dry-run --provenance --access public
+
       # 发布：OIDC 自动认证，无需任何 token；--provenance 生成来源签名
-      - run: npm publish --provenance --access public
+      - name: 发布到 npm
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
+        run: npm publish --provenance --access public --tag ${{ steps.dist.outputs.tag }}
