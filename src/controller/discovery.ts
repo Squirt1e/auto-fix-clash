@@ -1,4 +1,4 @@
-import { readdirSync } from 'node:fs';
+import { readdirSync, type Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { MihomoClient, NotMihomoError, UnauthorizedError } from './client.ts';
 import { describeEndpoint, HttpError, type ControllerEndpoint } from './http.ts';
@@ -81,16 +81,29 @@ const SOCKET_NAME_PATTERN = /(mihomo|clash|verge|party)/i;
 function discoverSocketFiles(): string[] {
   const found: string[] = [];
   for (const dir of SOCKET_DIRS) {
-    let entries: string[];
+    let entries: Dirent[];
     try {
-      entries = readdirSync(dir);
+      entries = readdirSync(dir, { withFileTypes: true });
     } catch {
       continue;
     }
     for (const entry of entries) {
-      if (!entry.endsWith('.sock')) continue;
-      if (!SOCKET_NAME_PATTERN.test(entry)) continue;
-      found.push(join(dir, entry));
+      if (entry.name.endsWith('.sock') && SOCKET_NAME_PATTERN.test(entry.name)) {
+        found.push(join(dir, entry.name));
+        continue;
+      }
+      // 有些客户端把套接字放在子目录里（如 /tmp/<客户端>/xxx.sock），
+      // 因此在名字像目标客户端的子目录里再找一层。
+      if (entry.isDirectory() && SOCKET_NAME_PATTERN.test(entry.name)) {
+        const subdir = join(dir, entry.name);
+        try {
+          for (const inner of readdirSync(subdir, { withFileTypes: true })) {
+            if (inner.isFile() && inner.name.endsWith('.sock')) found.push(join(subdir, inner.name));
+          }
+        } catch {
+          // 读不到就跳过
+        }
+      }
     }
   }
   return found;

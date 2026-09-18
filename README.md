@@ -74,6 +74,11 @@ pnpm add -g .         # 装成全局命令（链接到源码目录，改完代�
 
 从源码开发需要 Node.js ≥ 22.6（直接运行 TypeScript）。
 
+> 三种入口跑的东西不一样，改代码时注意：
+> - `pnpm afc <命令>` 直接跑 `src/`（改完立即生效，无需构建）
+> - 全局 `afc` 命令走后端 `bin/afc.js`：**有 `dist/` 就用 `dist/`**，所以改完源码要 `pnpm build`
+> - `afc schedule install` 安装的定时任务记录的是**安装时那个入口**；从源码目录安装时记的是 `src/cli/index.ts`，改完立即生效
+
 ### 先确认它认到了什么
 
 ```bash
@@ -168,10 +173,10 @@ afc groups --controller 127.0.0.1:9097 --secret <你的密钥>
 
 | 客户端 | 状态 | 说明 |
 |---|---|---|
-| Clash Party | ✅ 实测可用 | 控制端点是 `/tmp/mihomo-party-<uid>-<pid>.sock`（路径含 PID，每次启动都变，afc 自动重新发现）；运行时配置在 `<数据目录>/work/config.yaml` |
-| Clash Verge Rev | 机制上支持，未实测 | 若内核进程带 `-ext-ctl` 参数即可自动发现；否则用 `--controller` + `--secret` 指定 |
-| 独立安装的 mihomo | 机制上支持，未实测 | 用 `-d <目录>` 跑时，afc 会去 `<目录>/config.yaml` 找配置与节点定义 |
-| 其它前端 | 机制上支持，未实测 | 先跑 `afc groups` 看发现了什么，认不到就按上面的方式显式指定 |
+| Clash Party | ✅ 实测可用 | 控制端点是 `/tmp/mihomo-party-<uid>-<pid>.sock`（路径含 PID，每次启动都变，afc 会自动重新发现）；运行时配置在 `<数据目录>/work/config.yaml` |
+| Clash Verge Rev | 机制上支持，未实测 | ⚠️ 新版**默认不监听 TCP**：`config.yaml` 里那行 `external-controller: 127.0.0.1:9097` 并不会真正绑定，照着它连会 connection refused；默认 secret 是 `set-your-secret`。macOS 上要么在 Verge 里启用 TCP 控制器然后用 `--controller 127.0.0.1:9097 --secret <secret>`，要么让 afc 从内核进程参数/Unix 套接字自行发现（参见 [讨论 #6951](https://github.com/clash-verge-rev/clash-verge-rev/discussions/6951)） |
+| 独立安装的 mihomo | 机制上支持，未实测 | 用 `-d <目录>` 跑时，afc 会去 `<目录>/config.yaml` 找配置与节点定义；`-ext-ctl` / `-ext-ctl-unix` 会被自动识别 |
+| 其它前端 | 机制上支持，未实测 | 先跑 `afc groups` 看发现了什么；认不到就按上面的方式显式指定 |
 
 > 如果你的客户端要用外链的 `proxy-providers` 下发节点，afc 会先在运行时配置里找内联节点，
 > 找不到就去订阅档案（`profiles/*.yaml` 之类）里按**与当前组成员的吻合度**挑最匹配的那份。
