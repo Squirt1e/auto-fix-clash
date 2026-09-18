@@ -3,10 +3,11 @@ import { isGroup, isRealNode, type MihomoClient, type ProxyInfo } from '../contr
 import { ProbeEngine } from '../probe/engine.ts';
 import type { NodeProbeResult } from '../probe/engine.ts';
 import { readRuntimeConfig, runtimeConfigPathCandidates } from '../paths.ts';
+import { UsageError } from '../errors.ts';
 import { planRepair, type RepairPlan } from './plan.ts';
 
 /** 目标组不是可切换的选择器类型：可以继续体检，但无法安全地切换成员。 */
-export class GroupNotSwitchableError extends Error {
+export class GroupNotSwitchableError extends UsageError {
   constructor(group: string, type: string) {
     super(
       `代理组 “${group}” 的类型是 ${type}，不是可稳定指定的 Selector。\n` +
@@ -87,8 +88,9 @@ export async function repairTarget(options: RepairOptions): Promise<RepairOutcom
     const groups = Object.entries(allProxies)
       .filter(([, info]) => isGroup(info))
       .map(([name]) => name);
-    throw new Error(
-      `控制端点中没有名为 “${target.name}” 的代理组。\n现有的组：${groups.join(', ') || '（无）'}`,
+    throw new UsageError(
+      `控制端点中没有名为 “${target.name}” 的代理组（配置指向了一个不存在的组）。\n` +
+      `现有的组：${groups.join(', ') || '（无）'}`,
     );
   }
 

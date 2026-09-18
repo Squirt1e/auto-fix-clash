@@ -1,4 +1,5 @@
-import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK } from '../../exit-codes.ts';
+import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK, EXIT_USAGE } from '../../exit-codes.ts';
+import { UsageError } from '../../errors.ts';
 import { GroupNotSwitchableError, repairTarget, type RepairOutcome } from '../../heal/repair.ts';
 import { isQuiet, openRuntime, targetsFor } from '../runtime.ts';
 import { optBoolean, type CommandContext } from '../context.ts';
@@ -77,7 +78,12 @@ export async function run(context: CommandContext): Promise<number> {
     }
   }
 
-  if (outcomes.length === 0) return EXIT_ENVIRONMENT;
+  // 一组都没修成：区分「用法/配置问题」与「环境故障」，便于脚本正确告警
+  if (outcomes.length === 0) {
+    return failures.length > 0 && failures.every((f) => f.error instanceof UsageError)
+      ? EXIT_USAGE
+      : EXIT_ENVIRONMENT;
+  }
 
   const noCandidate = outcomes.filter((o) => o.plan.action === 'no-candidate').length;
   if (noCandidate > 0 && noCandidate === outcomes.length) return EXIT_NO_USABLE_NODE;

@@ -1,4 +1,5 @@
 import { isRealNode } from '../../controller/client.ts';
+import { UsageError } from '../../errors.ts';
 import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK } from '../../exit-codes.ts';
 import { describeEndpoints, ProbeEngine, type NodeProbeResult } from '../../probe/engine.ts';
 import { loadNodeDefinitions } from '../../heal/repair.ts';
@@ -66,8 +67,8 @@ export async function run(context: CommandContext): Promise<number> {
   for (const target of targets) {
     const groupInfo = allProxies[target.name];
     if (!groupInfo) {
-      throw new Error(
-        `控制端点中没有名为 “${target.name}” 的代理组。` +
+      throw new UsageError(
+        `控制端点中没有名为 “${target.name}” 的代理组（配置指向了一个不存在的组）。` +
         `现有的组：${Object.entries(allProxies).filter(([, i]) => i.all !== undefined).map(([n]) => n).join(', ')}`,
       );
     }
@@ -76,7 +77,7 @@ export async function run(context: CommandContext): Promise<number> {
       .filter((name) => definitions.nodeNames.includes(name));
 
     if (candidates.length === 0) {
-      if (!quiet) process.stdout.write(`代理组 ${target.name}：没有可探测的真实节点。\n`);
+      if (!quiet && !json) process.stdout.write(`代理组 ${target.name}：没有可探测的真实节点。\n`);
       report.push({ group: target.name, current: groupInfo.now, verdicts: [], candidatesConsidered: 0 });
       continue;
     }
@@ -90,7 +91,8 @@ export async function run(context: CommandContext): Promise<number> {
 
     let results: NodeProbeResult[];
     try {
-      if (!quiet) {
+      // --json 时必须让 stdout 保持纯 JSON：人类可读的表头一律不发到 stdout
+      if (!quiet && !json) {
         process.stdout.write(
           `\n代理组 ${target.name}（当前：${current ?? '（无）'}）\n` +
           `判据：${describeEndpoints(target)}\n` +

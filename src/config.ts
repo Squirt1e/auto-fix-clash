@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import { UsageError } from './errors.ts';
 
 /** 单个探测端点：以「期望状态码」判定节点对该目标是否可用。 */
 export interface ProbeEndpoint {
@@ -378,7 +379,7 @@ export function requireTarget(config: AfcConfig, groupName: string): TargetConfi
   const target = config.targets.find((t) => t.name === groupName);
   if (!target) {
     const known = config.targets.map((t) => t.name).join(', ');
-    throw new Error(
+    throw new UsageError(
       `没有为代理组 “${groupName}” 配置探测目标。已配置的组：${known || '（无）'}\n` +
       '请在 afc.config.yaml 的 targets 下新增该组，示例：\n' +
       '  targets:\n' +

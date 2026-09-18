@@ -1,9 +1,10 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { EXIT_ENVIRONMENT, EXIT_OK, EXIT_USAGE } from '../exit-codes.ts';
 import { ConfigError } from '../config.ts';
+import { UsageError } from '../errors.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -132,7 +133,7 @@ export async function main(argv: string[]): Promise<number> {
       process.stderr.write(`命令 “${command}”（${entry.summary}）尚未实现。\n`);
       return EXIT_ENVIRONMENT;
     }
-    if (err instanceof ConfigError) {
+    if (err instanceof ConfigError || err instanceof UsageError) {
       process.stderr.write(`${err.message}\n`);
       return EXIT_USAGE;
     }
@@ -141,10 +142,21 @@ export async function main(argv: string[]): Promise<number> {
   }
 }
 
-const invokedDirectly = process.argv[1] !== undefined &&
-  (process.argv[1].endsWith('afc.js') || process.argv[1].endsWith('cli/index.ts'));
+/**
+ * 是否为「直接执行本文件」（例如 `node src/cli/index.ts doctor`）。
+ * 用 realpath 比较而不是文件名后缀：后者在符号链接、相对路径下会判错。
+ */
+function isEntryPoint(): boolean {
+  const arg = process.argv[1];
+  if (!arg) return false;
+  try {
+    return realpathSync(arg) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+}
 
-if (invokedDirectly) {
+if (isEntryPoint()) {
   const code = await main(process.argv.slice(2));
   process.exitCode = code;
 }
