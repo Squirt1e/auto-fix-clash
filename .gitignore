@@ -4,3 +4,6 @@ dist/
 .DS_Store
 .afc/
 *.tgz
+
+# 本地的规划与实测记录，不提交
+openspec/
