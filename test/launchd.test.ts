@@ -51,10 +51,18 @@ test('路径中的特殊字符会被转义，避免破坏 plist', () => {
   assert.match(plist, /\/tmp\/a&amp;b&lt;c&gt;/);
 });
 
-test('间隔小于下限时在触碰调度器之前就被拒绝', async () => {
+// 计划任务只支持 macOS：这两条按平台分支，保证任何平台上测试套件都是绿的
+test('间隔小于下限时在触碰调度器之前就被拒绝', { skip: process.platform !== 'darwin' }, async () => {
   await assert.rejects(
     () => installSchedule({ ...baseOptions, intervalSeconds: 10 }),
     /间隔必须是 >= 60 秒的整数/,
+  );
+});
+
+test('非 macOS 平台直接拒绝，不去碰调度器', { skip: process.platform === 'darwin' }, async () => {
+  await assert.rejects(
+    () => installSchedule({ ...baseOptions, intervalSeconds: 300 }),
+    /只支持 macOS/,
   );
 });
 

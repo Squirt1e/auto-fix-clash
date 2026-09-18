@@ -19,15 +19,17 @@ permissions:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    # 本工具只支持 macOS（launchd 定时任务），因此在 macOS runner 上跑，
+    # 这样 launchd 相关逻辑也真的被测试覆盖；公共仓库 macOS runner 免费
+    runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 11
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
