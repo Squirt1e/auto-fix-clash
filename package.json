@@ -27,7 +27,7 @@
     "node": ">=20.11"
   },
   "bin": {
-    "afc": "./bin/afc.js"
+    "afc": "bin/afc.js"
   },
   "files": [
     "bin",
