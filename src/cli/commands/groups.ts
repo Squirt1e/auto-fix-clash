@@ -67,8 +67,9 @@ export async function run(context: CommandContext): Promise<number> {
     return EXIT_OK;
   }
 
-  const quiet = isQuiet(context);
-  if (!quiet) {
+  // 诊断信息（控制器/配置路径从哪来）只在 --verbose 时打印：
+  // 常规使用只需要"有哪些组、哪些已受管理"。
+  if (optBoolean(context.values, 'verbose')) {
     const configPath = runtimeConfigPathCandidates(runtime.config.probe.runtimeConfigPath)[0];
     process.stdout.write(
       `afc 配置：${runtime.config.sourcePath ?? '（未使用配置文件，采用内置默认）'}\n` +
@@ -79,46 +80,25 @@ export async function run(context: CommandContext): Promise<number> {
   }
 
   process.stdout.write(
-    pad('组名', 24) + pad('类型', 10) + pad('成员', 6) + pad('当前选中', 22) + '受 afc 管理\n',
+    pad('组名', 24) + pad('类型', 10) + pad('当前选中', 24) + '受 afc 管理\n',
   );
-  process.stdout.write('-'.repeat(78) + '\n');
+  process.stdout.write('-'.repeat(70) + '\n');
   for (const r of rows) {
-    // 只有手动选择组能被可靠地指定成员；自动选择型组会被内核下次体检覆盖
-    const manageState = r.configured
-      ? `是（作为 ${r.managed}）`
-      : r.switchable ? '否' : '否（类型不可切换）';
+    // 只有手动选择组能被可靠指定成员；自动选择型组会被内核下次体检覆盖
+    const manageState = r.configured ? '是' : r.switchable ? '否' : '不可切换';
     process.stdout.write(
       pad(r.name, 24) +
       pad(r.typeLabel, 10) +
-      pad(String(r.members), 6) +
-      pad(r.current, 22) +
+      pad(r.current, 24) +
       manageState + '\n',
     );
   }
 
-  const unmanaged = rows.filter((r) => !r.configured && r.switchable);
-  if (unmanaged.length > 0) {
+  if (rows.some((r) => !r.configured && r.switchable)) {
     process.stdout.write(
-      `\n让某个组受 afc 管理：在 afc.config.yaml 的 targets 里加一条（组名照抄上面一行）\n\n` +
-      '  targets:\n' +
-      `    - name: ${unmanaged[0]!.name}\n` +
-      '      probe:\n' +
-      '        url: https://www.example.com/            # 该组要访问的站点\n' +
-      '        expectedStatus: [200]                     # 该站点"能用"时的响应码\n' +
-      '      aliases: [别的订阅里的组名]                   # 可选：多订阅组名不同时用\n\n' +
-      `加好后用 afc doctor --group ${unmanaged[0]!.name} 验证，再用 afc fix --group ${unmanaged[0]!.name} 切换。\n` +
-      '注意：afc 只切换"手动选择"类型的组 —— 自动测速类组的成员会被内核自己改回去。\n',
-    );
-  } else if (rows.every((r) => r.configured || !r.switchable)) {
-    process.stdout.write(
-      '\n当前订阅里所有"手动选择"类型的组都已经受 afc 管理（或本就没有其它可切换的组）。\n',
+      '\n让某个组也受管理：在 afc.config.yaml 的 targets 里加一条（组名照抄上表），详见 README。\n',
     );
   }
-
-  process.stdout.write(
-    '\n提示：组名以当前订阅为准。切换订阅后组名可能不同 ——\n' +
-    '在目标配置里用 aliases 把各种叫法都写上，一套配置就能同时适配多个订阅。\n',
-  );
   return EXIT_OK;
 }
 

@@ -1,6 +1,7 @@
 import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK, EXIT_USAGE } from '../../exit-codes.ts';
 import { UsageError } from '../../errors.ts';
 import { GroupNotSwitchableError, TargetGroupMissingError, repairTarget, type RepairOutcome } from '../../heal/repair.ts';
+import { interactive } from '../format.ts';
 import { isQuiet, openRuntime, targetsFor } from '../runtime.ts';
 import { optBoolean, type CommandContext } from '../context.ts';
 
@@ -15,16 +16,17 @@ function summarize(outcome: RepairOutcome, dryRun: boolean): string {
   const { plan } = outcome;
   switch (plan.action) {
     case 'keep':
-      return `${outcome.group}: 保持 ${plan.to ?? '当前节点'}（可用，未做改动）`;
+      return `${outcome.group}：保持 ${plan.to ?? '当前节点'}（可用）`;
     case 'switch':
-      return `${outcome.group}: ${dryRun ? '将切换' : '已切换'} ${plan.from ?? '（无）'} → ${plan.to}`;
+      return `${outcome.group}：${dryRun ? '将切换' : '已切换'} ${plan.from ?? '（无）'} → ${plan.to}`;
     case 'no-candidate':
-      return `${outcome.group}: 无可用节点，未做改动（探测了 ${outcome.probedNodes} 个节点）`;
+      return `${outcome.group}：没有可用节点，未做改动`;
   }
 }
 
 export async function run(context: CommandContext): Promise<number> {
   const quiet = isQuiet(context);
+  const verbose = optBoolean(context.values, 'verbose');
   const dryRun = optBoolean(context.values, 'dry-run');
   const runtime = await openRuntime(context);
   const targets = targetsFor(runtime, context);
@@ -44,43 +46,43 @@ export async function run(context: CommandContext): Promise<number> {
           ? { runtimeConfigPath: runtime.config.probe.runtimeConfigPath }
           : {}),
         dryRun,
+        // 过程提示只在终端里显示（管道/日志下不产生噪音）
         onNotice: (message) => {
-          if (!quiet) process.stderr.write(`  ${message}\n`);
+          if (!quiet && interactive()) process.stderr.write(`  ${message}\n`);
         },
       });
       outcomes.push(outcome);
-      const line = `${timestamp()} ${summarize(outcome, dryRun)}`;
+      const summary = summarize(outcome, dryRun);
       if (quiet) {
-        process.stdout.write(line + '\n');
+        // 计划任务的日志：带时间戳的一行摘要
+        process.stdout.write(`${timestamp()} ${summary}\n`);
       } else {
-        process.stdout.write(`\n${line}\n`);
-        process.stdout.write(`  依据：${outcome.plan.reason}\n`);
-        if (outcome.plan.action === 'switch' && !dryRun) {
-          process.stdout.write('  已通过控制端点更新该组选择；未修改任何配置文件。\n');
-        }
+        process.stdout.write(summary + '\n');
+        // 详细的判定依据只在 --verbose 时展开
+        if (verbose) process.stdout.write(`  依据：${outcome.plan.reason}\n`);
       }
     } catch (err) {
       const error = err as Error;
       // 组不存在于当前订阅：多订阅场景下的正常情况，跳过而不是整体失败
       if (error instanceof TargetGroupMissingError) {
         skipped.push({ group: target.name, error });
-        process.stdout.write(
-          `${timestamp()} ${target.name}: 跳过（当前订阅没有这个组）` +
-          (quiet ? '\n' : `\n  ${error.message.split('\n')[1] ?? ''}\n`),
-        );
+        const line = `${target.name}：跳过（当前订阅没有这个组）`;
+        process.stdout.write(quiet ? `${timestamp()} ${line}\n` : `${line}\n`);
+        if (verbose) process.stderr.write(`${error.message}\n`);
         continue;
       }
       failures.push({ group: target.name, error });
       if (error instanceof GroupNotSwitchableError) {
         if (quiet) process.stdout.write(`${timestamp()} ${target.name}: 跳过（组类型不可切换）\n`);
-        else process.stderr.write(`\n${target.name}: ${error.message}\n`);
+        else process.stdout.write(`${target.name}：跳过（组类型不可切换，详见 --verbose）\n`);
+        if (verbose) process.stderr.write(`${error.message}\n`);
       } else if (quiet) {
         // 精简模式只把一行摘要写到 stdout（计划任务的日志），
         // 完整错误写到 stderr，保留事后排查所需的细节。
         process.stdout.write(`${timestamp()} ${target.name}: 执行失败 — ${error.message.split('\n')[0]}\n`);
         process.stderr.write(`${timestamp()} ${target.name} 执行失败：\n${error.stack ?? error.message}\n`);
       } else {
-        process.stderr.write(`\n${target.name}: 执行失败 — ${error.message}\n`);
+        process.stderr.write(`${target.name}：执行失败 — ${error.message}\n`);
       }
     }
   }

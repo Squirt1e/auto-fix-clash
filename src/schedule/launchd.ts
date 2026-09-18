@@ -255,17 +255,3 @@ export function describeProgramIdentity(program: string = process.execPath): Pro
   };
 }
 
-/** 系统里那个后台项到底是谁 —— 用用户能自行核对的方式说清楚。 */
-export function backgroundItemNotice(program: string = process.execPath): string {
-  const { authority, displayName, program: resolved } = describeProgramIdentity(program);
-  const base = resolved.split('/').pop() ?? resolved;
-  return [
-    '关于系统可能出现的「App 后台活动」提示：',
-    `  本任务执行的是 ${base}（${resolved}）${authority ? `，其代码签名主体是「${authority}」` : ''}。`,
-    `  macOS 的后台项列表按被执行程序的签名主体归类，所以它会显示为「${displayName}」，`,
-    '  而不是本项目的名字 —— 这不代表有别的软件被装到了你的机器上。',
-    '  查看或关闭：系统设置 → 通用 → 登录项与扩展',
-    `  核对内容：${plistPath()}`,
-    '  彻底移除：afc schedule uninstall',
-  ].join('\n');
-}

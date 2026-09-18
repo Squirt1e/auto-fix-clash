@@ -4,7 +4,6 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../../config.ts';
 import { EXIT_OK, EXIT_USAGE } from '../../exit-codes.ts';
 import {
-  backgroundItemNotice,
   buildPlist,
   describeProgramIdentity,
   installSchedule,
@@ -73,14 +72,13 @@ export async function run(context: CommandContext): Promise<number> {
 
       const result = await installSchedule(plistOptions);
       process.stdout.write(
-        `已安装周期性修复任务。\n` +
-        `  间隔：${interval} 秒\n` +
+        `已安装周期性修复任务：每 ${interval} 秒运行一次（${result.message}）\n` +
         `  任务定义：${result.plistPath}\n` +
-        `  日志：${result.logPath}\n` +
-        `  ${result.message}\n\n` +
-        '说明：该任务只通过控制端点切换代理组的选中节点，不会修改任何 Clash 配置。\n' +
-        '用 afc schedule uninstall 可完全移除。\n\n' +
-        backgroundItemNotice() + '\n',
+        `  运行日志：${result.logPath}\n\n` +
+        '提示：系统「App 后台活动」里它会显示为「' + describeProgramIdentity().displayName + '」\n' +
+        '      （执行的是 node，macOS 按代码签名主体归类），不代表装了别的软件。\n' +
+        '      查看/关闭：系统设置 → 通用 → 登录项与扩展\n' +
+        '      卸载：afc schedule uninstall（不修改任何 Clash 配置）\n',
       );
       return EXIT_OK;
     }
@@ -99,29 +97,29 @@ export async function run(context: CommandContext): Promise<number> {
 
     case 'status': {
       const status = await scheduleStatus();
-      const identity = describeProgramIdentity();
+      if (!status.installed) {
+        process.stdout.write('未安装周期性修复任务（afc schedule install 可安装）。\n');
+        return EXIT_OK;
+      }
       process.stdout.write(
-        `周期性修复任务状态\n` +
-        `  已安装：${status.installed ? '是' : '否'}\n` +
-        `  已载入调度器：${status.loaded ? '是' : '否'}\n` +
-        `  间隔：${status.intervalSeconds === undefined ? '—' : `${status.intervalSeconds} 秒`}\n` +
-        `  任务定义：${status.plistPath}\n` +
-        `  执行程序：${identity.program}\n` +
-        `  系统里显示为：${identity.displayName}\n` +
-        `  日志：${status.logPath}\n` +
-        (status.lastExitStatus ? `  最近退出码：${status.lastExitStatus}\n` : '') +
-        (status.lastLogLine ? `  最近日志：${status.lastLogLine}\n` : '') +
-        (status.installed && !status.loaded
-          ? '\n注意：任务已安装但未被调度器载入，请重新执行 afc schedule install。\n'
-          : ''),
+        `周期性修复任务：${status.loaded ? '运行中' : '已安装但未被调度器载入'}` +
+        `${status.intervalSeconds === undefined ? '' : `，每 ${status.intervalSeconds} 秒`}\n` +
+        (status.lastLogLine ? `  最近一次：${status.lastLogLine}\n` : '  还没有运行记录。\n'),
       );
-      if (status.installed) {
+      if (!status.loaded) {
+        process.stdout.write('  请重新执行 afc schedule install 以载入调度器。\n');
+      }
+      if (optBoolean(context.values, 'verbose')) {
+        const identity = describeProgramIdentity();
         process.stdout.write(
-          '\n「系统里显示为」那一行就是它在「系统设置 → 通用 → 登录项与扩展」中的名字：\n' +
-          '它以被执行程序的代码签名主体归类，所以不是本项目的名字。\n' +
-          `核对内容可直接打开：${status.plistPath}\n`,
+          `\n  任务定义：${status.plistPath}\n` +
+          `  执行程序：${identity.program}\n` +
+          `  系统里显示为：${identity.displayName}\n` +
+          `  日志：${status.logPath}\n` +
+          `  最近退出码：${status.lastExitStatus ?? '（未记录）'}\n`,
         );
       }
+      process.stdout.write('  卸载：afc schedule uninstall　（--verbose 查看路径与显示名）\n');
       return EXIT_OK;
     }
 

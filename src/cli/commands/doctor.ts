@@ -4,7 +4,7 @@ import { TargetGroupMissingError } from '../../heal/repair.ts';
 import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK } from '../../exit-codes.ts';
 import { describeEndpoints, ProbeEngine, type NodeProbeResult } from '../../probe/engine.ts';
 import { loadNodeDefinitions } from '../../heal/repair.ts';
-import { pad, formatMs } from '../format.ts';
+import { pad, formatMs, interactive, clearProgressLine } from '../format.ts';
 import { isQuiet, openRuntime, targetsFor } from '../runtime.ts';
 import { optBoolean, type CommandContext } from '../context.ts';
 
@@ -22,27 +22,11 @@ const VERDICT_ORDER: Record<NodeProbeResult['verdict'], number> = {
   dead: 3,
 };
 
-/** 表格用的短依据：去掉冗长的原始错误细节，保留结论。 */
-function compactReason(result: NodeProbeResult): string {
-  switch (result.verdict) {
-    case 'ok':
-      return `通过 ${result.statusCode}`;
-    case 'blocked':
-      return `目标站点拒绝该出口（HTTP ${result.statusCode}）`;
-    case 'country-policy':
-      return `出口国家不符合策略`;
-    case 'dead': {
-      const attempts = /重试 (\d+) 次/.exec(result.reason);
-      const cause = /（([^）]*)）/.exec(result.reason)?.[1] ?? '';
-      const short = cause.split('；')[0]?.split('：')[0]?.trim() ?? '';
-      return `无 HTTP 响应${attempts ? `（重试 ${attempts[1]} 次）` : ''}${short ? `：${short}` : ''}`;
-    }
-  }
-}
 
 export async function run(context: CommandContext): Promise<number> {
   const quiet = isQuiet(context);
   const json = optBoolean(context.values, 'json');
+  const verbose = optBoolean(context.values, 'verbose');
   const runtime = await openRuntime(context);
   const targets = targetsFor(runtime, context);
   const client = runtime.controller.client;
@@ -108,18 +92,26 @@ export async function run(context: CommandContext): Promise<number> {
       // --json 时必须让 stdout 保持纯 JSON：人类可读的表头一律不发到 stdout
       if (!quiet && !json) {
         process.stdout.write(
-          `\n代理组 ${groupName}（当前：${current ?? '（无）'}）\n` +
-          `判据：${describeEndpoints(target)}\n` +
-          `候选：${candidates.length} 个，探测并发上限 ${runtime.config.probe.concurrency}\n\n`,
+          `${groupName}　当前：${current ?? '（无）'}　候选 ${candidates.length} 个\n`,
         );
+        // 判据与并发这类实现细节只在 --verbose 时展示
+        if (verbose) {
+          process.stdout.write(
+            `  判据：${describeEndpoints(target)}\n` +
+            `  并发上限：${runtime.config.probe.concurrency}\n`,
+          );
+        }
       }
+      // 进度用单行覆盖，且只在终端里输出：管道/日志下不产生噪音
       results = await engine.probeAll(candidates, target, (result, index) => {
-        if (quiet) return;
-        const label = VERDICT_LABEL[result.verdict];
-        process.stderr.write(`  [${index + 1}/${candidates.length}] ${label} ${result.node} — ${result.reason}\n`);
+        if (quiet || json || !interactive()) return;
+        process.stderr.write(
+          `\r  探测 ${index + 1}/${candidates.length}　${pad(result.node, 22)}${VERDICT_LABEL[result.verdict]}　　`,
+        );
       });
     } finally {
       await engine.close();
+      if (!quiet && !json) clearProgressLine();
     }
 
     anyProbed = true;
@@ -156,26 +148,22 @@ export async function run(context: CommandContext): Promise<number> {
 
     if (json) continue;
 
-    process.stdout.write(
-      pad('节点', 30) + pad('判定', 10) + pad('状态码', 8) + pad('出口', 6) + pad('耗时', 9) + '依据\n',
-    );
-    process.stdout.write('-'.repeat(100) + '\n');
+    // 只保留能说明问题的列：判定/状态码/出口/耗时已足够，逐行的"依据"是重复信息
+    process.stdout.write('\n' + pad('节点', 30) + pad('判定', 8) + pad('状态码', 8) + pad('出口', 6) + '耗时\n');
+    process.stdout.write('-'.repeat(62) + '\n');
     for (const r of ordered) {
-      const marker = r.node === current ? '* ' : '  ';
-      // 表格里只放一句短依据；完整原因在 --json 输出里
-      const reason = compactReason(r);
       process.stdout.write(
-        marker + pad(r.node, 28) +
-        pad(VERDICT_LABEL[r.verdict], 10) +
+        (r.node === current ? '* ' : '  ') + pad(r.node, 28) +
+        pad(VERDICT_LABEL[r.verdict], 8) +
         pad(r.statusCode === undefined ? '—' : String(r.statusCode), 8) +
         pad(r.country ?? '—', 6) +
-        pad(formatMs(r.ttfbMs), 9) +
-        reason + '\n',
+        formatMs(r.ttfbMs) + '\n',
       );
     }
     process.stdout.write(
-      `\n汇总：可用 ${counts['ok'] ?? 0} / 国家受限 ${counts['country-policy'] ?? 0} / ` +
-      `被拒绝 ${counts['blocked'] ?? 0} / 死节点 ${counts['dead'] ?? 0}（共 ${results.length}，* 为当前节点）\n`,
+      `\n可用 ${counts['ok'] ?? 0}　被拒绝 ${counts['blocked'] ?? 0}　` +
+      `国家受限 ${counts['country-policy'] ?? 0}　死节点 ${counts['dead'] ?? 0}　` +
+      `共 ${results.length}（* 为当前节点）\n`,
     );
   }
 

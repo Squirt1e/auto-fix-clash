@@ -15,36 +15,34 @@
 
 体检 —— 一条命令看清每个节点到底行不行（下面是真实输出）：
 
-```
+```bash
 $ afc doctor
-代理组 GPT（当前：[Normal x0.5] 日本 02）
-判据：chatgpt.com/backend-api/codex/responses + api.openai.com/v1/models
+GPT　当前：[Normal x0.5] 日本 03　候选 38 个
 
-节点                          判定      状态码  出口  耗时     依据
-  [Advanced x3] 香港 18       被拒绝    403     HK    425ms    目标站点拒绝该出口（HTTP 403）
-  [Advanced x3] 香港 20       被拒绝    403     HK    441ms    目标站点拒绝该出口（HTTP 403）
-  [Normal] 美国 03            可用      405     US    829ms    通过 405
-  [Normal x0.5] 新加坡 04     可用      405     SG    860ms    通过 405
-  [Priority x2] 日本 14       死节点    —       —     —        无 HTTP 响应（重试 2 次）
-* [Normal x0.5] 日本 02       可用      405     JP    998ms    通过 405
+节点                          判定    状态码  出口  耗时
+--------------------------------------------------------------
+  [Normal x0.5] 日本 06       可用    405     JP    606ms
+* [Normal x0.5] 日本 03       可用    405     JP    729ms
+  [Normal] 美国 03            可用    405     US    857ms
+  [Normal x0.5] 香港 06       被拒绝  403     HK    366ms
+  [Normal x0.5] 香港 01       被拒绝  403     HK    571ms
+  [Normal x0.5] 日本 01       死节点  —       —     —
 
-汇总：可用 19 / 被拒绝 13 / 死节点 6（共 38，* 为当前节点）
+可用 14　被拒绝 13　国家受限 0　死节点 11　共 38（* 为当前节点）
 ```
 
 修复 —— 当前节点坏掉时自动换（也是真实输出）：
 
-```
+```bash
 $ afc fix --group GPT
-2026-09-18 13:11:21 GPT: 已切换 [Normal x0.5] 日本 02 → [Normal x0.5] 日本 03
-  依据：当前节点不可用（重试 2 次后仍无 HTTP 响应）；切换到实测可用节点（返回 405，出口 JP，625ms）
-  已通过控制端点更新该组选择；未修改任何配置文件。
+GPT：已切换 [Normal x0.5] 日本 02 → [Normal x0.5] 日本 03
 ```
 
 如果当前节点还是好的，它什么都不做，只探测这一个节点（约 2 秒）：
 
-```
+```bash
 $ afc fix --group GPT
-GPT: 保持 [Normal x0.5] 日本 03（可用，未做改动）
+GPT：保持 [Normal x0.5] 日本 03（可用）
 ```
 
 ## 安装
@@ -83,20 +81,28 @@ pnpm add -g .         # 装成全局命令（链接到源码目录，改完代�
 
 ```bash
 $ afc groups
+组名                    类型      当前选中                 受 afc 管理
+-----------------------------------------------------------------------
+GPT                     手动选择  [Normal x0.5] 日本 03    是
+Netflix                 手动选择  Proxy                    否
+Youtube                 手动选择  Proxy                    否
+自动选择                自动测速  [Advanced x3] 香港 20    不可切换
+
+让某个组也受管理：在 afc.config.yaml 的 targets 里加一条（组名照抄上表），详见 README。
+```
+
+这一条回答两个问题：**有哪些组**（能写进 `--group`）、**哪些组还没被管理**。
+`不可切换` 指该组是自动测速类，成员会被内核自己改回去，afc 不会去动它。
+
+排查「它到底认到了什么」时加 `--verbose`：
+
+```bash
+$ afc groups --verbose
 afc 配置：/Users/you/auto-fix-clash/afc.config.yaml
 控制器：unix:/tmp/mihomo-party-502-609.sock（来源：内核进程 16946 的 -ext-ctl-unix）
 内核版本：v1.19.27
 运行时配置：~/Library/Application Support/mihomo-party/work/config.yaml
-
-组名                    类型      成员  当前选中              受 afc 管理
-------------------------------------------------------------------------------
-GPT                     手动选择  39    [Normal x0.5] 日本 04 是（作为 GPT）
-Netflix                 手动选择  39    Proxy                否
-Youtube                 手动选择  39    Proxy                否
-自动选择                自动测速  38    [Advanced x3] 香港 20 否（类型不可切换）
 ```
-
-这一条同时回答三个问题：**有哪些组**（能写进 `--group`）、**哪些组还没被管理**、**afc 到底发现了哪个控制器和哪份配置**。
 
 ## 使用
 
@@ -124,7 +130,12 @@ afc doctor --json             # 机器可读，可直接喂给 jq
 afc fix --group GPT           # 只在当前节点不可用时才换
 afc fix --all                 # 照顾所有已配置的组
 afc fix --dry-run             # 只看会怎么切，不动
+afc --version                 # 版本号（等同于 afc version）
+afc <命令> --verbose          # 额外打印诊断信息（控制器来源、配置路径、判定依据）
 ```
+
+输出默认保持简洁：体检是「一行表头 + 一张表 + 一行汇总」，修复每次只打印一行结果；
+进度提示只在终端里以单行覆盖显示，管道和日志里不会出现噪音。
 
 ### 给别的组也加上保护
 

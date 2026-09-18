@@ -26,29 +26,27 @@ const HELP = `afc — 为 Clash/mihomo 代理组挑选真正可用的节点
   doctor           体检：逐个探测目标组的候选节点，输出判定与依据（不改动当前选择）
   fix              修复：按「仅当前节点不可用才切换」策略为指定组或全部组切换节点
   schedule         周期性修复任务：install / uninstall / status
-  help             显示本帮助
-  version          显示版本
+  version          显示版本（等同于 --version）
 
 通用选项：
   --config <path>     指定配置文件（默认 ./afc.config.yaml 或 ~/.config/afc/config.yaml）
   --group <name>      指定目标组（doctor / fix），默认使用配置里的第一个组
   --all               对全部已配置组执行（fix）
-  --json              以机器可读格式输出（doctor）
-  --quiet             精简输出（供计划任务使用）
+  --json              以机器可读格式输出
+  --quiet             精简输出：每次运行只留一行（计划任务用）
+  --verbose           额外打印诊断信息（控制器来源、配置路径等）
   --dry-run           只展示将要执行的改动，不写入
   --controller <ep>   显式指定控制端点：unix:/path/to.sock 或 127.0.0.1:9090
   --secret <s>        控制端点认证密钥
   -h, --help          显示帮助
+  -V, --version       显示版本
 
 示例：
   afc groups                     # 当前订阅有哪些组？--group 该写什么？
   afc doctor                     # 体检 GPT 组并打印可用性表格
   afc doctor --json              # 机器可读输出，便于脚本消费
   afc fix --group GPT            # 仅在当前节点不可用时才换到可用节点
-  afc fix --all                  # 修复全部已配置组
   afc schedule install           # 安装周期性修复（默认每 300 秒）
-  afc schedule status            # 查看任务是否已载入与最近运行情况
-  afc schedule uninstall         # 完全移除任务
 
 说明：本工具只通过 mihomo 控制端点切换代理组的选中节点，不会修改任何 Clash 配置文件。
 
@@ -85,6 +83,13 @@ function isNotImplemented(err: unknown): boolean {
 }
 
 export async function main(argv: string[]): Promise<number> {
+  // 输出被下游提前关闭时（例如 `afc groups | head`）不要抛栈：静默结束即可。
+  for (const stream of [process.stdout, process.stderr]) {
+    stream.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EPIPE') process.exit(EXIT_OK);
+    });
+  }
+
   let parsed;
   try {
     parsed = parseArgs({
@@ -102,7 +107,9 @@ export async function main(argv: string[]): Promise<number> {
         controller: { type: 'string' },
         secret: { type: 'string' },
         interval: { type: 'string' },
+        verbose: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
+        version: { type: 'boolean', short: 'V', default: false },
       },
     });
   } catch (err) {
@@ -113,12 +120,13 @@ export async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parsed;
   const command = positionals[0];
 
-  if (values.help || command === undefined || command === 'help') {
-    process.stdout.write(HELP);
+  // --version / -V 是约定的写法；version 子命令保留为等价别名
+  if (values.version || command === 'version') {
+    process.stdout.write(`${packageVersion()}\n`);
     return EXIT_OK;
   }
-  if (command === 'version') {
-    process.stdout.write(`${packageVersion()}\n`);
+  if (values.help || command === undefined || command === 'help') {
+    process.stdout.write(HELP);
     return EXIT_OK;
   }
 
