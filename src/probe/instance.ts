@@ -208,6 +208,9 @@ export class ProbeInstance {
       if (exitInfo) break;
       try {
         await client.version(1500);
+        // 端点能应答还不够：必须确认我们的探针组已经就绪，
+        // 否则随后的 PUT /proxies/<探针组> 会 404（实测出现过一次）。
+        await client.proxy(`${PROBE_GROUP_PREFIX}0__`);
         ready = true;
         break;
       } catch {

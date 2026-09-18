@@ -49,14 +49,18 @@ export function parseExpectedStatus(value: string): number[] {
   return codes;
 }
 
-/** 决定写到哪个配置文件：显式指定 > 已有的候选 > 当前目录新建。 */
-function resolveWritePath(explicit?: string): string {
+/**
+ * 决定写到哪个配置文件：显式指定 > 已有的那份 > 固定的用户级位置。
+ *
+ * 关键：没有现成配置时**不要**按当前目录新建 —— 否则在不同目录运行会各生成一份，
+ * 计划任务指向哪一份就变得不可预期（实测踩过：在 home 目录跑一次就多出一份配置，
+ * 定时任务从此读的是那一份）。
+ */
+export function resolveWritePath(explicit?: string): string {
   if (explicit) return isAbsolute(explicit) ? explicit : resolve(explicit);
   const existing = resolveConfigPath();
   if (existing) return existing;
-  const userLevel = join(homedir(), '.config', 'afc', 'config.yaml');
-  // 用户级配置已存在目录时优先写它，否则写在当前目录（便于随项目一起管理）
-  return existsSync(join(homedir(), '.config', 'afc')) ? userLevel : resolve('afc.config.yaml');
+  return join(homedir(), '.config', 'afc', 'config.yaml');
 }
 
 export async function run(context: CommandContext): Promise<number> {

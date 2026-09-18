@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { loadConfig, type TargetConfig } from './config.ts';
@@ -147,6 +147,7 @@ export interface ConfigWriteResult {
  */
 export function writeConfigText(path: string, text: string): ConfigWriteResult {
   const created = !existsSync(path);
+  mkdirSync(dirname(path), { recursive: true });
   const tmp = join(dirname(path), `.afc-${process.pid.toString(36)}-${Date.now().toString(36)}.tmp`);
   writeFileSync(tmp, text, 'utf8');
   try {

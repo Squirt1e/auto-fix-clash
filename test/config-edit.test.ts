@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -11,7 +11,7 @@ import {
   writeConfigText,
 } from '../src/config-edit.ts';
 import { loadConfig, type TargetConfig } from '../src/config.ts';
-import { parseExpectedStatus } from '../src/cli/commands/add.ts';
+import { parseExpectedStatus, resolveWritePath } from '../src/cli/commands/add.ts';
 
 const TARGET: TargetConfig = {
   name: 'Netflix',
@@ -142,5 +142,32 @@ test('写入后配置文件能被完整加载（含 probe/schedule 段）', () =
     assert.deepEqual(config.targets.map((t) => t.name), ['GPT', 'Netflix']);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('没有现成配置时写到固定的用户级路径，而不是当前目录', () => {
+  // 实测踩过的坑：按 cwd 新建会在不同目录各生成一份配置，
+  // 计划任务指向哪一份变得不可预期。这里把 HOME 与 cwd 都隔离出来验证。
+  // macOS 上 /var 是 /private/var 的符号链接，而 resolve() 会归一化路径，
+  // 这里先把临时目录取成真实路径，避免与断言里的字符串形态不一致。
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'afc-cwd-')));
+  const fakeHome = realpathSync(mkdtempSync(join(tmpdir(), 'afc-home-')));
+  const oldHome = process.env['HOME'];
+  const oldCwd = process.cwd();
+  process.env['HOME'] = fakeHome;
+  process.chdir(dir);
+  try {
+    assert.equal(resolveWritePath(), join(fakeHome, '.config', 'afc', 'config.yaml'));
+    // 当前目录已有配置时应当优先使用它（项目内管理配置的用法）
+    writeFileSync(join(dir, 'afc.config.yaml'), 'targets: []\n', 'utf8');
+    assert.equal(resolveWritePath(), join(dir, 'afc.config.yaml'));
+    // 显式指定优先于一切
+    assert.equal(resolveWritePath('/tmp/explicit.yaml'), '/tmp/explicit.yaml');
+  } finally {
+    if (oldHome === undefined) delete process.env['HOME'];
+    else process.env['HOME'] = oldHome;
+    process.chdir(oldCwd);
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(fakeHome, { recursive: true, force: true });
   }
 });

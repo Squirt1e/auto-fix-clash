@@ -6,6 +6,35 @@ import { pad } from '../format.ts';
 import { isQuiet, openRuntime } from '../runtime.ts';
 import { optBoolean, type CommandContext } from '../context.ts';
 
+export interface GroupRow {
+  name: string;
+  typeLabel: string;
+  current: string;
+  /** 是否受 afc 管理（配置声明或自动接管）。 */
+  managed: boolean;
+  /** 是否由配置显式声明。 */
+  configured: boolean;
+  /** 是否为可被可靠切换的类型（只有手动选择组可以）。 */
+  switchable: boolean;
+}
+
+/**
+ * 排序：会受管理的组放前面（显式声明的优先于自动接管的），
+ * 其次是可切换但未被管理的，最后是不可切换的；同组内按名称排序。
+ */
+export function sortGroupRows(rows: GroupRow[]): GroupRow[] {
+  const rank = (row: GroupRow): number => {
+    if (row.configured) return 0;
+    if (row.managed) return 1;
+    return row.switchable ? 2 : 3;
+  };
+  return [...rows].sort((a, b) => {
+    const byRank = rank(a) - rank(b);
+    if (byRank !== 0) return byRank;
+    return a.name.localeCompare(b.name, 'zh');
+  });
+}
+
 const GROUP_TYPE_LABEL: Record<string, string> = {
   Selector: '手动选择',
   URLTest: '自动测速',
@@ -37,18 +66,17 @@ export async function run(context: CommandContext): Promise<number> {
   const autoByGroup = new Map(expansion.targets.map((t) => [t.groupName, t.source]));
   const configuredGroups = new Set(runtime.config.targets.map((t) => t.name));
 
-  const rows = groups
-    .map(([name, info]) => ({
+  const rows = sortGroupRows(
+    groups.map(([name, info]) => ({
       name,
       typeLabel: GROUP_TYPE_LABEL[info.type] ?? info.type,
-      members: (info.all ?? []).length,
       current: info.now ?? '—',
       managed: autoByGroup.has(name),
       configured: autoByGroup.get(name) === 'configured',
       /** 是否为可被可靠切换的类型（只有手动选择组可以）。 */
       switchable: info.type === 'Selector',
-    }))
-    .sort((a, b) => a.name.localeCompare(b.name, 'zh'));
+    })),
+  );
 
   if (optBoolean(context.values, 'json')) {
     process.stdout.write(JSON.stringify({
@@ -58,9 +86,9 @@ export async function run(context: CommandContext): Promise<number> {
       groups: rows.map((r) => ({
         name: r.name,
         type: r.typeLabel,
-        members: r.members,
         current: r.current,
-        managedAs: r.managed ?? null,
+        managed: r.managed,
+        source: r.configured ? 'configured' : r.managed ? 'auto' : null,
       })),
     }, null, 2) + '\n');
     return EXIT_OK;

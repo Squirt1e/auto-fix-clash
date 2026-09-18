@@ -17,8 +17,12 @@ function summarize(outcome: RepairOutcome, dryRun: boolean): string {
   switch (plan.action) {
     case 'keep':
       return `${outcome.group}：保持 ${plan.to ?? '当前节点'}（可用）`;
-    case 'switch':
-      return `${outcome.group}：${dryRun ? '将切换' : '已切换'} ${plan.from ?? '（无）'} → ${plan.to}`;
+    case 'switch': {
+      // 原来是"委托给其它组"的状态时点一句：这次会把该组钉到具体节点上
+      const wasDelegate = outcome.currentProbe === undefined && plan.from !== undefined;
+      const note = wasDelegate ? '（该组原本委托给其它组，现已改为固定节点）' : '';
+      return `${outcome.group}：${dryRun ? '将切换' : '已切换'} ${plan.from ?? '（无）'} → ${plan.to}${note}`;
+    }
     case 'no-candidate':
       return `${outcome.group}：没有可用节点，未做改动`;
   }
