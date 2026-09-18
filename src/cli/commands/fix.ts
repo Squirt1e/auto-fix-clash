@@ -1,6 +1,6 @@
 import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK, EXIT_USAGE } from '../../exit-codes.ts';
 import { UsageError } from '../../errors.ts';
-import { GroupNotSwitchableError, repairTarget, type RepairOutcome } from '../../heal/repair.ts';
+import { GroupNotSwitchableError, TargetGroupMissingError, repairTarget, type RepairOutcome } from '../../heal/repair.ts';
 import { isQuiet, openRuntime, targetsFor } from '../runtime.ts';
 import { optBoolean, type CommandContext } from '../context.ts';
 
@@ -32,9 +32,9 @@ export async function run(context: CommandContext): Promise<number> {
 
   const outcomes: RepairOutcome[] = [];
   const failures: { group: string; error: Error }[] = [];
+  const skipped: { group: string; error: Error }[] = [];
 
   for (const target of targets) {
-    const notices: string[] = [];
     try {
       const outcome = await repairTarget({
         config: runtime.config,
@@ -46,7 +46,6 @@ export async function run(context: CommandContext): Promise<number> {
         dryRun,
         onNotice: (message) => {
           if (!quiet) process.stderr.write(`  ${message}\n`);
-          notices.push(message);
         },
       });
       outcomes.push(outcome);
@@ -62,9 +61,17 @@ export async function run(context: CommandContext): Promise<number> {
       }
     } catch (err) {
       const error = err as Error;
+      // 组不存在于当前订阅：多订阅场景下的正常情况，跳过而不是整体失败
+      if (error instanceof TargetGroupMissingError) {
+        skipped.push({ group: target.name, error });
+        process.stdout.write(
+          `${timestamp()} ${target.name}: 跳过（当前订阅没有这个组）` +
+          (quiet ? '\n' : `\n  ${error.message.split('\n')[1] ?? ''}\n`),
+        );
+        continue;
+      }
       failures.push({ group: target.name, error });
       if (error instanceof GroupNotSwitchableError) {
-        // 组类型不可安全切换：报告但不视为环境故障
         if (quiet) process.stdout.write(`${timestamp()} ${target.name}: 跳过（组类型不可切换）\n`);
         else process.stderr.write(`\n${target.name}: ${error.message}\n`);
       } else if (quiet) {
@@ -78,8 +85,16 @@ export async function run(context: CommandContext): Promise<number> {
     }
   }
 
-  // 一组都没修成：区分「用法/配置问题」与「环境故障」，便于脚本正确告警
+  // 一个组都没能处理：区分「用法/配置问题」与「环境故障」，便于脚本正确告警
   if (outcomes.length === 0) {
+    // 全部目标都只是"当前订阅里没有" → 这是配置与订阅不匹配，属于用法问题
+    if (skipped.length === targets.length && targets.length > 0) {
+      const first = skipped[0]!.error;
+      process.stderr.write(
+        `\n当前订阅里没有任何已配置的目标组。\n${first.message}\n`,
+      );
+      return EXIT_USAGE;
+    }
     return failures.length > 0 && failures.every((f) => f.error instanceof UsageError)
       ? EXIT_USAGE
       : EXIT_ENVIRONMENT;

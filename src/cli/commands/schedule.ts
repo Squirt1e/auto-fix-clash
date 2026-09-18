@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../../config.ts';
@@ -16,8 +17,26 @@ import {
 import { optBoolean, optNumber, optString, type CommandContext } from '../context.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-/** 计划任务要执行的 CLI 入口（与本模块同属 src/cli）。 */
-const CLI_ENTRY = join(HERE, '..', 'index.ts');
+
+/**
+ * 计划任务要执行的 CLI 入口。
+ *
+ * 必须同时兼容两种形态：源码运行（src/cli/index.ts）与 npm 安装后的
+ * 编译产物（dist/cli/index.js，此时扩展名是 .js）。优先用实际被执行的脚本
+ * （process.argv[1]），它最准确；拿不到时按当前模块的扩展名推断同级入口。
+ */
+function resolveCliEntry(): string {
+  const argv1 = process.argv[1];
+  if (argv1 && /\.(m?js|ts)$/.test(argv1)) {
+    try {
+      return realpathSync(argv1);
+    } catch {
+      // 落到下面的推断
+    }
+  }
+  const ext = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
+  return join(HERE, '..', `index${ext}`);
+}
 
 const USAGE = `用法：afc schedule <install|uninstall|status> [选项]
 
@@ -40,7 +59,7 @@ export async function run(context: CommandContext): Promise<number> {
       const interval = optNumber(context.values, 'interval') ?? config.schedule.intervalSeconds;
       const plistOptions = {
         nodePath: process.execPath,
-        cliPath: CLI_ENTRY,
+        cliPath: resolveCliEntry(),
         intervalSeconds: interval,
         workingDirectory: process.cwd(),
         ...(config.sourcePath ? { configPath: config.sourcePath } : {}),

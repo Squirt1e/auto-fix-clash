@@ -27,6 +27,11 @@ export interface GeoProbe {
 export interface TargetConfig {
   /** 组名，需与 mihomo 中的代理组名一致。 */
   name: string;
+  /**
+   * 备用组名。不同订阅可能给同一用途的组起不同名字
+   * （例如 A 订阅叫 `GPT`、B 订阅叫 `ChatGPT`），用别名即可一套配置通用。
+   */
+  aliases: string[];
   /** 主判据。 */
   probe: ProbeEndpoint;
   /** 附加判据（任一通过即视为该组端点通过）。 */
@@ -37,6 +42,47 @@ export interface TargetConfig {
   countryAllow: string[];
   /** 出口国家黑名单；命中即判不可用。 */
   countryDeny: string[];
+}
+
+/**
+ * 归一化组名，用于「宽容匹配」。
+ *
+ * 动机来自真实数据：同一个用途的组在不同机场里可能叫 `GPT`、`🤖AI网站`、
+ * `AI 网站`、`ChatGPT专用`。去掉 emoji、空白与常见分隔符后比较，
+ * 一套 aliases 才能同时适配多个订阅。
+ */
+export function normalizeGroupName(name: string): string {
+  return name
+    // 只去「图形类」emoji 与区域指示符（国旗）、变体选择符、零宽连接符。
+    // 注意不能用 \p{Emoji_Component}：它把数字和 # * 也算作 emoji 组件，
+    // 会把「香港 01」变成「香港」、「GPT-4」变成「gpt」，造成误匹配。
+    .replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\uFE0F\u200D]/gu, '')
+    .replace(/[\s_\-·.,:：（）()【】\[\]{}]/g, '')
+    .toLowerCase();
+}
+
+/**
+ * 在当前订阅实际存在的组里，找出该目标对应的组名。
+ *
+ * 两级匹配：先按主名与别名精确匹配（可预期），都没命中时再按归一化名匹配
+ * （用于吸收 emoji 前缀、大小写、分隔符差异）。
+ */
+export function findGroupName(target: TargetConfig, availableGroups: readonly string[]): string | undefined {
+  const wanted = targetGroupNames(target);
+  for (const candidate of wanted) {
+    if (availableGroups.includes(candidate)) return candidate;
+  }
+  const normalizedWanted = wanted.map(normalizeGroupName);
+  for (const normalized of normalizedWanted) {
+    const hit = availableGroups.find((group) => normalizeGroupName(group) === normalized);
+    if (hit !== undefined) return hit;
+  }
+  return undefined;
+}
+
+/** 该目标声明的全部候选组名（主名 + 别名）。 */
+export function targetGroupNames(target: TargetConfig): string[] {
+  return [target.name, ...target.aliases];
 }
 
 export interface ProbeSettings {
@@ -86,6 +132,8 @@ const GPT_COUNTRY_DENY = ['HK', 'CN', 'MO', 'RU', 'IR', 'KP', 'CU', 'SY', 'AF', 
 export const DEFAULT_TARGETS: TargetConfig[] = [
   {
     name: 'GPT',
+    // 各机场对同一个用途的叫法差别很大；归一化匹配还能吸收 emoji 前缀差异
+    aliases: ['ChatGPT', 'OpenAI', 'AI网站', 'AI 专用', 'ChatGPT 专用', '人工智能'],
     probe: {
       // 可用出口返回 405；被目标站点拒绝的出口（如香港）返回 403。
       // 注意：不要用 https://chatgpt.com/ 首页做判据 —— 它对所有出口都返回
@@ -176,7 +224,12 @@ function normalizeEndpoint(raw: unknown, where: string, problems: string[]): Pro
   return endpoint;
 }
 
-function normalizeStringList(raw: unknown, where: string, problems: string[]): string[] {
+function normalizeStringList(
+  raw: unknown,
+  where: string,
+  problems: string[],
+  uppercase = true,
+): string[] {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) {
     problems.push(`${where} 必须是字符串数组`);
@@ -188,7 +241,8 @@ function normalizeStringList(raw: unknown, where: string, problems: string[]): s
         problems.push(`${where} 含非字符串项`);
         return '';
       }
-      return v.trim().toUpperCase();
+      const trimmed = v.trim();
+      return uppercase ? trimmed.toUpperCase() : trimmed;
     })
     .filter((v) => v !== '');
 }
@@ -241,8 +295,15 @@ function normalizeTarget(raw: unknown, index: number, problems: string[]): Targe
     problems.push(`${where}.geoProbe 必须是 { url: string } 对象（可省略以禁用出口国家判定）`);
   }
 
+  // 组名命中内置预设时继承其别名（显式写 [] 表示不要别名）
+  const rawAliases = raw['aliases'];
+  const aliases = rawAliases === undefined || rawAliases === null
+    ? (preset ? [...preset.aliases] : [])
+    : normalizeStringList(rawAliases, `${where}.aliases`, problems, false);
+
   return {
     name: name.trim(),
+    aliases,
     probe,
     extraProbes,
     ...(geoProbe ? { geoProbe } : {}),
@@ -361,10 +422,20 @@ export function loadConfig(explicitPath?: string): AfcConfig {
     problems.push('targets 为空：至少需要配置一个目标组');
   }
 
-  const seen = new Set<string>();
+  // 组名与别名不允许跨目标重复：否则一个组会同时被两个目标管理，行为不可预期
+  const seen = new Map<string, string>();
   for (const t of targets) {
-    if (seen.has(t.name)) problems.push(`targets 中存在重复的组名：${t.name}`);
-    seen.add(t.name);
+    for (const groupName of targetGroupNames(t)) {
+      const owner = seen.get(groupName);
+      if (owner !== undefined) {
+        problems.push(
+          `组名 “${groupName}” 被多个目标使用（${owner} 与 ${t.name}）——` +
+          '同一个组只能由一个目标管理',
+        );
+        continue;
+      }
+      seen.set(groupName, t.name);
+    }
   }
 
   if (problems.length > 0) throw new ConfigError(problems);

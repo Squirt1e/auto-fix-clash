@@ -48,7 +48,7 @@ test('非法期望状态码会被拒绝并给出定位', () => {
 });
 
 test('重复组名会被拒绝', () => {
-  assert.throws(() => loadConfig(fixture('duplicate-targets.yaml')), /重复的组名/);
+  assert.throws(() => loadConfig(fixture('duplicate-targets.yaml')), /被多个目标使用/);
 });
 
 test('计划任务间隔过小会被拒绝', () => {

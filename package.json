@@ -1,20 +1,38 @@
 {
   "name": "auto-fix-clash",
   "version": "0.1.0",
-  "private": true,
-  "description": "为 Clash/mihomo 代理组自动选择真正可用的节点（以目标站点端到端判据为准）",
+  "description": "为 Clash/mihomo 代理组自动挑选真正可用的节点（判据是目标站点的真实响应，而不是延迟或节点名）",
+  "keywords": [
+    "clash",
+    "mihomo",
+    "clash-verge",
+    "clash-party",
+    "proxy",
+    "proxy-group",
+    "chatgpt",
+    "codex"
+  ],
+  "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=22.6"
+    "node": ">=20.11"
   },
   "bin": {
     "afc": "./bin/afc.js"
   },
+  "files": [
+    "bin",
+    "dist",
+    "afc.config.yaml",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "afc": "node src/cli/index.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json",
-    "test": "node --test \"test/**/*.test.ts\""
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "yaml": "^2.8.0"

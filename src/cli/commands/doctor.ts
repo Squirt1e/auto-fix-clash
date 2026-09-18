@@ -1,8 +1,10 @@
-import { isRealNode } from '../../controller/client.ts';
-import { UsageError } from '../../errors.ts';
+import { isGroup, isRealNode } from '../../controller/client.ts';
+import { findGroupName } from '../../config.ts';
+import { TargetGroupMissingError } from '../../heal/repair.ts';
 import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK } from '../../exit-codes.ts';
 import { describeEndpoints, ProbeEngine, type NodeProbeResult } from '../../probe/engine.ts';
 import { loadNodeDefinitions } from '../../heal/repair.ts';
+import { pad, formatMs } from '../format.ts';
 import { isQuiet, openRuntime, targetsFor } from '../runtime.ts';
 import { optBoolean, type CommandContext } from '../context.ts';
 
@@ -19,18 +21,6 @@ const VERDICT_ORDER: Record<NodeProbeResult['verdict'], number> = {
   blocked: 2,
   dead: 3,
 };
-
-function pad(value: string, width: number): string {
-  // 中文按 2 列宽估算，避免表格错位
-  let length = 0;
-  for (const ch of value) length += /[\u4e00-\u9fff]/.test(ch) ? 2 : 1;
-  const padding = Math.max(0, width - length);
-  return value + ' '.repeat(padding);
-}
-
-function formatMs(ms: number | undefined): string {
-  return ms === undefined ? '—' : `${ms}ms`;
-}
 
 /** 表格用的短依据：去掉冗长的原始错误细节，保留结论。 */
 function compactReason(result: NodeProbeResult): string {
@@ -57,28 +47,52 @@ export async function run(context: CommandContext): Promise<number> {
   const targets = targetsFor(runtime, context);
   const client = runtime.controller.client;
 
-  const definitions = loadNodeDefinitions(runtime.config.probe.runtimeConfigPath);
   const allProxies = await client.proxies();
 
   const report: unknown[] = [];
   let anyUsable = false;
   let anyProbed = false;
 
+  const availableGroups = Object.entries(allProxies)
+    .filter(([, info]) => isGroup(info))
+    .map(([name]) => name);
+
+  // 先把每个目标解析成具体组，并收集所有需要节点定义的成员名 ——
+  // 再据此挑选「当前生效」的节点定义文件（多订阅/多客户端下这一步很关键）。
+  interface PlannedTarget { target: (typeof targets)[number]; groupName: string; groupCandidates: string[] }
+  const planned: PlannedTarget[] = [];
   for (const target of targets) {
-    const groupInfo = allProxies[target.name];
-    if (!groupInfo) {
-      throw new UsageError(
-        `控制端点中没有名为 “${target.name}” 的代理组（配置指向了一个不存在的组）。` +
-        `现有的组：${Object.entries(allProxies).filter(([, i]) => i.all !== undefined).map(([n]) => n).join(', ')}`,
-      );
+    const groupName = findGroupName(target, availableGroups);
+    if (!groupName) {
+      // 多订阅切换后组名对不上是正常情况：多目标时跳过，单目标时直接报错并给指引
+      if (targets.length > 1) {
+        process.stderr.write(`${target.name}: 跳过（当前订阅没有这个组）\n`);
+        report.push({ group: target.name, missing: true, verdicts: [] });
+        continue;
+      }
+      throw new TargetGroupMissingError(target, availableGroups);
     }
-    const candidates = (groupInfo.all ?? [])
-      .filter((name) => isRealNode(allProxies[name]))
-      .filter((name) => definitions.nodeNames.includes(name));
+    const groupInfo = allProxies[groupName]!;
+    planned.push({
+      target,
+      groupName,
+      groupCandidates: (groupInfo.all ?? []).filter((name) => isRealNode(allProxies[name])),
+    });
+  }
+
+  const needed = [...new Set(planned.flatMap((p) => p.groupCandidates))];
+  const definitions = loadNodeDefinitions({
+    ...(runtime.config.probe.runtimeConfigPath ? { runtimeConfigPath: runtime.config.probe.runtimeConfigPath } : {}),
+    neededNodeNames: needed,
+  });
+
+  for (const { target, groupName, groupCandidates: groupInfoCandidates } of planned) {
+    const groupInfo = allProxies[groupName]!;
+    const candidates = groupInfoCandidates.filter((name) => definitions.nodeNames.includes(name));
 
     if (candidates.length === 0) {
-      if (!quiet && !json) process.stdout.write(`代理组 ${target.name}：没有可探测的真实节点。\n`);
-      report.push({ group: target.name, current: groupInfo.now, verdicts: [], candidatesConsidered: 0 });
+      if (!quiet && !json) process.stdout.write(`代理组 ${groupName}：没有可探测的真实节点。\n`);
+      report.push({ group: groupName, current: groupInfo.now, verdicts: [], candidatesConsidered: 0 });
       continue;
     }
 
@@ -94,7 +108,7 @@ export async function run(context: CommandContext): Promise<number> {
       // --json 时必须让 stdout 保持纯 JSON：人类可读的表头一律不发到 stdout
       if (!quiet && !json) {
         process.stdout.write(
-          `\n代理组 ${target.name}（当前：${current ?? '（无）'}）\n` +
+          `\n代理组 ${groupName}（当前：${current ?? '（无）'}）\n` +
           `判据：${describeEndpoints(target)}\n` +
           `候选：${candidates.length} 个，探测并发上限 ${runtime.config.probe.concurrency}\n\n`,
         );
@@ -124,7 +138,7 @@ export async function run(context: CommandContext): Promise<number> {
     }, {});
 
     report.push({
-      group: target.name,
+      group: groupName,
       current,
       currentUsable: results.find((r) => r.node === current)?.verdict === 'ok',
       summary: counts,
@@ -132,10 +146,10 @@ export async function run(context: CommandContext): Promise<number> {
     });
 
     // 体检不得改变当前选择
-    const after = await client.proxy(target.name);
+    const after = await client.proxy(groupName);
     if (after.now !== current) {
       process.stderr.write(
-        `警告：体检后发现 ${target.name} 的当前选择从 ${current ?? '（无）'} 变成 ${after.now ?? '（无）'}，` +
+        `警告：体检后发现 ${groupName} 的当前选择从 ${current ?? '（无）'} 变成 ${after.now ?? '（无）'}，` +
         '请检查是否有其它程序在同时切换该组。\n',
       );
     }

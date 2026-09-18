@@ -22,6 +22,7 @@ const HELP = `afc — 为 Clash/mihomo 代理组挑选真正可用的节点
 用法：afc <命令> [选项]
 
 命令：
+  groups           列出当前订阅实际存在的代理组（确定 --group 该写什么）
   doctor           体检：逐个探测目标组的候选节点，输出判定与依据（不改动当前选择）
   fix              修复：按「仅当前节点不可用才切换」策略为指定组或全部组切换节点
   schedule         周期性修复任务：install / uninstall / status
@@ -40,6 +41,7 @@ const HELP = `afc — 为 Clash/mihomo 代理组挑选真正可用的节点
   -h, --help          显示帮助
 
 示例：
+  afc groups                     # 当前订阅有哪些组？--group 该写什么？
   afc doctor                     # 体检 GPT 组并打印可用性表格
   afc doctor --json              # 机器可读输出，便于脚本消费
   afc fix --group GPT            # 仅在当前节点不可用时才换到可用节点
@@ -71,6 +73,7 @@ const loadCommand = (name: string): Promise<{ run: CommandHandler }> =>
 const COMMANDS: Record<string, { summary: string; run: () => Promise<CommandHandler> }> = {
   doctor: { summary: '体检目标组的候选节点', run: async () => (await loadCommand('doctor')).run },
   fix: { summary: '按粘性策略修复代理组', run: async () => (await loadCommand('fix')).run },
+  groups: { summary: '列出当前订阅的代理组（用于确定 --group 该写什么）', run: async () => (await loadCommand('groups')).run },
   schedule: { summary: '管理周期性修复任务', run: async () => (await loadCommand('schedule')).run },
 };
 

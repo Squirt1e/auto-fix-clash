@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { accessSync, constants, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 
 /** Clash Party 的数据目录。 */
@@ -164,6 +164,7 @@ export interface RuntimeConfigSummary {
   secret?: string;
   proxies: unknown[];
   proxyGroups: unknown[];
+  proxyProviders: Record<string, unknown>;
 }
 
 export function readRuntimeConfig(path: string): RuntimeConfigSummary {
@@ -171,6 +172,8 @@ export function readRuntimeConfig(path: string): RuntimeConfigSummary {
   if (!doc || typeof doc !== 'object') throw new Error(`运行时配置不是有效的 YAML 映射：${path}`);
   const str = (v: unknown): string | undefined =>
     typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
+  const obj = (v: unknown): Record<string, unknown> =>
+    typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
   return {
     path,
     ...(str(doc['external-controller']) ? { externalController: str(doc['external-controller']) } : {}),
@@ -178,5 +181,130 @@ export function readRuntimeConfig(path: string): RuntimeConfigSummary {
     ...(str(doc['secret']) ? { secret: str(doc['secret']) } : {}),
     proxies: Array.isArray(doc['proxies']) ? doc['proxies'] : [],
     proxyGroups: Array.isArray(doc['proxy-groups']) ? doc['proxy-groups'] : [],
+    proxyProviders: obj(doc['proxy-providers']),
   };
+}
+
+export interface NodeDefinitionSource {
+  /** 节点定义（可直接喂给探针实例）。 */
+  proxies: unknown[];
+  nodeNames: string[];
+  /** 定义来自哪个文件。 */
+  path: string;
+  /** runtime-config = 内核实际在跑的配置；profile-file = 订阅档案。 */
+  kind: 'runtime-config' | 'profile-file';
+  /** 该文件里是否使用了 proxy-providers（节点由外部下发）。 */
+  usesProxyProviders: boolean;
+}
+
+function proxyNames(proxies: unknown[]): string[] {
+  return proxies
+    .map((p) => (typeof p === 'object' && p !== null ? (p as { name?: unknown }).name : undefined))
+    .filter((n): n is string => typeof n === 'string' && n !== '');
+}
+
+/** 命中的节点名越多，说明这个文件越可能就是当前生效的订阅。 */
+function scoreNames(names: string[], needed?: readonly string[]): number {
+  if (!needed || needed.length === 0) return names.length;
+  const wanted = new Set(needed);
+  return names.reduce((acc, n) => acc + (wanted.has(n) ? 1 : 0), 0);
+}
+
+/** 订阅档案可能存放的位置（运行时配置所在目录及其上级的 profiles 子目录等）。 */
+function profileFileCandidates(runtimeConfigPaths: string[]): string[] {
+  const dirs = new Set<string>();
+  for (const path of runtimeConfigPaths) {
+    const dir = dirname(path);
+    dirs.add(dir);
+    dirs.add(dirname(dir));
+  }
+  dirs.add(clashPartyDataDir());
+  dirs.add(clashVergeDataDir());
+
+  const files: string[] = [];
+  for (const dir of dirs) {
+    for (const sub of [dir, join(dir, 'profiles'), join(dir, 'profile'), join(dir, 'subscriptions')]) {
+      let entries;
+      try {
+        entries = readdirSync(sub, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        if (!/\.(ya?ml)$/i.test(entry.name)) continue;
+        files.push(join(sub, entry.name));
+      }
+    }
+  }
+  return [...new Set(files)];
+}
+
+export class NodeDefinitionNotFoundError extends Error {
+  constructor(tried: string[], needed?: readonly string[]) {
+    super(
+      '找不到可用的节点定义。\n' +
+      (needed && needed.length > 0
+        ? `需要定义的节点（当前订阅的组成员，共 ${needed.length} 个）：${needed.slice(0, 3).join('、')}${needed.length > 3 ? ' …' : ''}\n`
+        : '') +
+      '已检查的文件：\n' + tried.map((p) => `  - ${p}`).join('\n') + '\n' +
+      '如果节点由 proxy-providers 外链下发，请确认该订阅能被内核正常加载；\n' +
+      '也可以在 afc.config.yaml 里用 probe.runtimeConfigPath 显式指定运行时配置路径。',
+    );
+    this.name = 'NodeDefinitionNotFoundError';
+  }
+}
+
+/**
+ * 找出「当前生效的」节点定义。
+ *
+ * 不同客户端喂给内核的运行时配置位置不同，而且有些客户端把节点放在外链的
+ * proxy-providers 里。这里按「与当前订阅组成员的重合度」挑最匹配的文件，
+ * 从而对 Clash Party / Clash Verge / 独立 mihomo 都尽量通用。
+ */
+export function findNodeDefinitions(
+  options: { runtimeConfigPath?: string; neededNodeNames?: readonly string[] } = {},
+): NodeDefinitionSource {
+  // 显式指定了运行时配置就只认它（外加订阅档案兜底）：
+  // 否则机器上同时存在多个客户端时，会挑到另一个客户端的数据，用户无法预期。
+  const explicitPath = options.runtimeConfigPath
+    ? (isAbsolute(options.runtimeConfigPath) ? options.runtimeConfigPath : resolve(options.runtimeConfigPath))
+    : undefined;
+  const runtimePaths = explicitPath ? [explicitPath] : runtimeConfigPathCandidates();
+  const tried: string[] = [];
+  let best: NodeDefinitionSource | undefined;
+  let bestScore = -1;
+
+  const consider = (path: string, kind: NodeDefinitionSource['kind']): void => {
+    if (tried.includes(path)) return;
+    tried.push(path);
+    let summary: RuntimeConfigSummary;
+    try {
+      summary = readRuntimeConfig(path);
+    } catch {
+      return;
+    }
+    if (summary.proxies.length === 0) return;
+    const names = proxyNames(summary.proxies);
+    const score = scoreNames(names, options.neededNodeNames);
+    if (score > bestScore) {
+      bestScore = score;
+      best = {
+        proxies: summary.proxies,
+        nodeNames: names,
+        path,
+        kind,
+        usesProxyProviders: Object.keys(summary.proxyProviders).length > 0,
+      };
+    }
+  };
+
+  for (const path of runtimePaths) consider(path, 'runtime-config');
+  // 运行时配置里没有内联节点时（或重合度为 0），去订阅档案里找
+  if (bestScore <= 0) {
+    for (const path of profileFileCandidates(runtimePaths)) consider(path, 'profile-file');
+  }
+
+  if (!best || bestScore <= 0) throw new NodeDefinitionNotFoundError(tried, options.neededNodeNames);
+  return best;
 }

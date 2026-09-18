@@ -5,7 +5,7 @@
 
 ## 它解决什么问题
 
-用你这份真实订阅实测出来的三件事：
+用真实订阅实测出来的三件事：
 
 1. **延迟最低的节点往往最不能用。** GPT 组里最快的是香港节点（425ms），但它们对 OpenAI 全部返回 `403`，一个都用不了；能用的美国/日本/新加坡节点反而更慢（800–1000ms）。按延迟挑节点必然踩坑。
 2. **节点名称会说谎。** 名为「香港 20」的节点，第一次实测出口在 **JP** 且可用，几小时后再测变成 **HK** 且被拒绝。所以只能每次实测。
@@ -49,20 +49,49 @@ GPT: 保持 [Normal x0.5] 日本 03（可用，未做改动）
 
 ## 安装
 
-**需要**：macOS、Node.js ≥ 22.6、以及**正在运行的** Clash Party（或 Clash Verge）。
-afc 复用你现有的 mihomo 内核，不下载、不内置内核。
+### 用 npm（推荐）
 
 ```bash
-cd ~/Projects/AI/auto-fix-clash
-pnpm install        # 安装依赖
-pnpm add -g .       # 可选：把 afc 装成全局命令（之后任意目录都能用 afc）
+npm i -g auto-fix-clash
+afc groups            # 能列出你当前订阅的代理组就算装好了
 ```
 
-验证一下：
+要求：**macOS** + **Node.js ≥ 20**。
+
+内核不用单独装：afc 复用你现有 Clash 客户端自带的 mihomo，不下载、不内置内核。
+
+> 包名是 `auto-fix-clash`。如果安装时提示找不到这个包，说明还没有发布到你的 npm 源，
+> 用下面的「从源码」方式即可（功能完全一致）。
+
+### 从源码
 
 ```bash
-afc doctor          # 能打印出上面那张体检表就装好了
+git clone <仓库地址> auto-fix-clash && cd auto-fix-clash
+pnpm install
+pnpm build
+pnpm add -g .         # 装成全局命令（链接到源码目录，改完代码立即生效）
 ```
+
+从源码开发需要 Node.js ≥ 22.6（直接运行 TypeScript）。
+
+### 先确认它认到了什么
+
+```bash
+$ afc groups
+afc 配置：/Users/you/auto-fix-clash/afc.config.yaml
+控制器：unix:/tmp/mihomo-party-502-609.sock（来源：内核进程 16946 的 -ext-ctl-unix）
+内核版本：v1.19.27
+运行时配置：~/Library/Application Support/mihomo-party/work/config.yaml
+
+组名                    类型      成员  当前选中              受 afc 管理
+------------------------------------------------------------------------------
+GPT                     手动选择  39    [Normal x0.5] 日本 04 是（作为 GPT）
+Netflix                 手动选择  39    Proxy                否
+Youtube                 手动选择  39    Proxy                否
+自动选择                自动测速  38    [Advanced x3] 香港 20 否（类型不可切换）
+```
+
+这一条同时回答三个问题：**有哪些组**（能写进 `--group`）、**哪些组还没被管理**、**afc 到底发现了哪个控制器和哪份配置**。
 
 ## 使用
 
@@ -77,17 +106,18 @@ afc schedule uninstall   # 彻底移除
 它由 macOS 的 launchd 每隔几分钟拉起一个**一次性短命进程**，没有常驻守护：
 
 - 先只验证该组**当前节点**；可用就什么都不做
-- 只有当前节点不可用时，才扫描候选并切到实测可用的节点（找到即停）
+- 只有当前节点不可用时，才按顺序筛查候选并切到第一个实测可用的（找到即停）
 - **不写任何 Clash 配置**，只通过控制端点改变该组的选中节点
 
 ### 想看看 / 想手动修
 
 ```bash
+afc groups                    # 当前订阅有哪些组？（确定 --group 该写什么）
 afc doctor                    # 体检（默认第一个已配置的组）
 afc doctor --group GPT        # 指定组
 afc doctor --json             # 机器可读，可直接喂给 jq
 afc fix --group GPT           # 只在当前节点不可用时才换
-afc fix --all                 # 修所有已配置的组
+afc fix --all                 # 照顾所有已配置的组
 afc fix --dry-run             # 只看会怎么切，不动
 ```
 
@@ -97,14 +127,68 @@ afc fix --dry-run             # 只看会怎么切，不动
 
 ```yaml
 targets:
-  - name: Youtube                     # 组名，要和 Clash 里的组名一致
+  - name: Youtube                     # 组名，要和 Clash 里的组名对得上
+    aliases: [🎬媒体解锁, Youtube专用]   # 可选：别的订阅里的叫法
     probe:
       url: https://www.youtube.com/generate_204
-      expectedStatus: [204]
+      expectedStatus: [204]           # 该站点"能用"时的响应码
     geoProbe:
       url: https://www.youtube.com/cdn-cgi/trace
       format: cloudflare-trace
     countryDeny: [CN]                 # 出口国家黑名单（可选）
+```
+
+## 我的客户端不是 Clash Party，能用吗
+
+能。afc 不依赖任何特定客户端 —— 它只需要两样东西：mihomo 的**控制端点**、以及内核**正在使用**的运行时配置。
+两者都优先从**运行中的内核进程**读取（`-ext-ctl-unix` / `-ext-ctl` / `-d` 参数），只要该客户端是用 mihomo 内核跑的，这套发现方式就成立。
+
+自动查找顺序：
+
+1. `--controller` / `--secret` 显式指定
+2. 运行中内核进程的命令行参数（最可靠，能覆盖"配置里没写控制器"的情况）
+3. 运行时配置里的 `external-controller` / `external-controller-unix` / `secret`
+4. `/tmp`、`/var/run` 等目录下名字像 mihomo/clash 的套接字
+5. 默认 TCP 端口 `127.0.0.1:9090`
+
+认不到时，`afc groups` 会告诉你它找到了什么、用了哪个来源；也可以显式指定：
+
+```yaml
+# afc.config.yaml
+probe:
+  kernelPath: /path/to/mihomo                  # 内核二进制（一般不用写，会自动找）
+  runtimeConfigPath: /path/to/config.yaml      # 内核正在用的那份配置
+```
+
+```bash
+afc groups --controller 127.0.0.1:9097 --secret <你的密钥>
+```
+
+已知情况：
+
+| 客户端 | 状态 | 说明 |
+|---|---|---|
+| Clash Party | ✅ 实测可用 | 控制端点是 `/tmp/mihomo-party-<uid>-<pid>.sock`（路径含 PID，每次启动都变，afc 自动重新发现）；运行时配置在 `<数据目录>/work/config.yaml` |
+| Clash Verge Rev | 机制上支持，未实测 | 若内核进程带 `-ext-ctl` 参数即可自动发现；否则用 `--controller` + `--secret` 指定 |
+| 独立安装的 mihomo | 机制上支持，未实测 | 用 `-d <目录>` 跑时，afc 会去 `<目录>/config.yaml` 找配置与节点定义 |
+| 其它前端 | 机制上支持，未实测 | 先跑 `afc groups` 看发现了什么，认不到就按上面的方式显式指定 |
+
+> 如果你的客户端要用外链的 `proxy-providers` 下发节点，afc 会先在运行时配置里找内联节点，
+> 找不到就去订阅档案（`profiles/*.yaml` 之类）里按**与当前组成员的吻合度**挑最匹配的那份。
+> 都不行时它会明确告诉你检查了哪些文件，而不会静默失败。
+
+## 有多个订阅时怎么切换
+
+**不用在 afc 里切换** —— 切换订阅是客户端的功能。afc 只处理「当前生效的那个订阅」，而且会自动跟着走：
+
+- 节点定义和代理组都取自**内核当前正在跑的配置**，所以在客户端里换订阅后，下一次 `afc doctor` / `afc fix` 就是新订阅的环境
+- 组名不一样也没关系：目标支持 `aliases`，而且匹配分两级 —— **先精确匹配**，再**忽略 emoji 前缀、大小写、空格/短横线/点号**匹配
+- 真实例子：本机两个订阅，一个把 GPT 组叫 `GPT`，另一个叫 `🤖AI网站`，内置别名已经能自动认出这两种
+- 定时任务跑的是 `fix --all`：**某个目标在当前订阅里不存在时会跳过并说明**，不会报错；只有一个都匹配不上时才以退出码 64 提示你补别名
+
+```bash
+afc groups          # 换订阅后先看一眼：现在有哪些组、哪些已被 afc 管理
+afc fix --all       # 能管的都会照顾到；不存在的会明确写"跳过（当前订阅没有这个组）"
 ```
 
 ## 常见问题
@@ -133,21 +217,30 @@ targets:
 | 0 | 成功（找到或保持可用节点） |
 | 2 | 未找到可用节点 |
 | 3 | 环境故障（控制端点不可达、内核缺失等） |
-| 64 | 用法错误（命令写错、组名没配置等） |
+| 64 | 用法错误（命令写错、组名没配置、订阅里没有该组等） |
 
 ## 卸载
 
 ```bash
-afc schedule uninstall        # 移除定时任务与日志
-pnpm remove -g auto-fix-clash # 移除全局命令（如果装过）
+afc schedule uninstall                # 移除定时任务与日志
+npm remove -g auto-fix-clash          # 移除全局命令（用哪个工具装的就用哪个卸载）
+# 若当时是用 pnpm 装的：pnpm remove -g auto-fix-clash
 ```
 
 卸载后 Clash 的行为与安装前完全一致（唯一残留是历史上被切换过的组选择，你可以在 Clash 里手动改回）。
 
-## 想深入了解
+## 给维护者
 
-- 设计与决策依据（含被否决的方案）：`openspec/changes/add-proxy-group-auto-heal/design.md`
-- 实测证据与被推翻的早期结论：`verification/README.md`
-- 需求规格：`openspec/changes/add-proxy-group-auto-heal/specs/`
+```bash
+pnpm install
+pnpm test        # 70 个测试
+pnpm typecheck
+npm pack         # 打包装产物（prepack 会自动构建）
+npm publish      # 需要 npm 账号；包名 auto-fix-clash
+```
 
-开发：`pnpm typecheck`、`pnpm test`（58 个测试）。
+源码结构：`src/controller`（控制端点发现与 API）、`src/probe`（隔离探针实例与判定）、
+`src/heal`（粘性修复策略）、`src/schedule`（launchd）、`src/cli`（命令）。
+
+设计依据与被推翻的早期结论：`openspec/changes/add-proxy-group-auto-heal/design.md`、
+实测证据：`verification/README.md`。
