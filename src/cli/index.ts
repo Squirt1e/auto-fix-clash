@@ -26,7 +26,6 @@ const HELP = `afc — 为 Clash/mihomo 代理组挑选真正可用的节点
   doctor           体检：逐个探测目标组的候选节点，输出判定与依据（不改动当前选择）
   fix              修复：按「仅当前节点不可用才切换」策略为指定组或全部组切换节点
   schedule         周期性修复任务：install / uninstall / status
-  version          显示版本（等同于 --version）
 
 通用选项：
   --config <path>     指定配置文件（默认 ./afc.config.yaml 或 ~/.config/afc/config.yaml）
@@ -39,7 +38,7 @@ const HELP = `afc — 为 Clash/mihomo 代理组挑选真正可用的节点
   --controller <ep>   显式指定控制端点：unix:/path/to.sock 或 127.0.0.1:9090
   --secret <s>        控制端点认证密钥
   -h, --help          显示帮助
-  -V, --version       显示版本
+  -v, --version       显示版本
 
 示例：
   afc groups                     # 当前订阅有哪些组？--group 该写什么？
@@ -109,7 +108,7 @@ export async function main(argv: string[]): Promise<number> {
         interval: { type: 'string' },
         verbose: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
-        version: { type: 'boolean', short: 'V', default: false },
+        version: { type: 'boolean', short: 'v', default: false },
       },
     });
   } catch (err) {
@@ -120,8 +119,7 @@ export async function main(argv: string[]): Promise<number> {
   const { values, positionals } = parsed;
   const command = positionals[0];
 
-  // --version / -V 是约定的写法；version 子命令保留为等价别名
-  if (values.version || command === 'version') {
+  if (values.version) {
     process.stdout.write(`${packageVersion()}\n`);
     return EXIT_OK;
   }
@@ -132,7 +130,8 @@ export async function main(argv: string[]): Promise<number> {
 
   const entry = COMMANDS[command];
   if (!entry) {
-    process.stderr.write(`未知命令：${command}\n\n${HELP}`);
+    const hint = command === 'version' ? '（版本号请用：afc --version 或 afc -v）\n' : '';
+    process.stderr.write(`未知命令：${command}\n${hint}\n${HELP}`);
     return EXIT_USAGE;
   }
 

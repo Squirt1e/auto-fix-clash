@@ -26,16 +26,21 @@ async function capture(argv: string[]): Promise<{ code: number; out: string; err
   }
 }
 
-test('--version 与 -V 都打印版本号，且与 version 子命令一致', async () => {
+test('--version 与 -v 都打印版本号', async () => {
   const long = await capture(['--version']);
-  const short = await capture(['-V']);
-  const sub = await capture(['version']);
-  for (const result of [long, short, sub]) {
+  const short = await capture(['-v']);
+  for (const result of [long, short]) {
     assert.equal(result.code, EXIT_OK);
     assert.match(result.out.trim(), /^\d+\.\d+\.\d+$/);
   }
-  assert.equal(long.out, sub.out);
-  assert.equal(short.out, sub.out);
+  assert.equal(long.out, short.out);
+});
+
+test('version 子命令已被移除，只提示正确的写法', async () => {
+  const result = await capture(['version']);
+  assert.equal(result.code, EXIT_USAGE);
+  assert.match(result.err, /未知命令：version/);
+  assert.match(result.err, /afc --version 或 afc -v/);
 });
 
 test('--help 与 help 子命令输出用法', async () => {

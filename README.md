@@ -130,7 +130,7 @@ afc doctor --json             # 机器可读，可直接喂给 jq
 afc fix --group GPT           # 只在当前节点不可用时才换
 afc fix --all                 # 照顾所有已配置的组
 afc fix --dry-run             # 只看会怎么切，不动
-afc --version                 # 版本号（等同于 afc version）
+afc -v / afc --version        # 版本号
 afc <命令> --verbose          # 额外打印诊断信息（控制器来源、配置路径、判定依据）
 ```
 
