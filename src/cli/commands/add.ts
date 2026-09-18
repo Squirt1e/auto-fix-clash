@@ -7,25 +7,9 @@ import { isGroup } from '../../controller/client.ts';
 import { UsageError } from '../../errors.ts';
 import { EXIT_OK } from '../../exit-codes.ts';
 import { genericTarget, matchPreset, presetToTarget } from '../../targets/presets.ts';
+import { ADD_HELP } from '../help.ts';
 import { openRuntime } from '../runtime.ts';
 import { optBoolean, optString, type CommandContext } from '../context.ts';
-
-const USAGE = `用法：afc add <组名> [选项]
-
-把某个代理组加入配置，使其按指定判据参与定时修复。
-
-选项：
-  --url <地址>            探测地址（不给则用内置预设，没有预设时用通用可达性判据）
-  --expect <状态码>       期望状态码：200 / 200,301 / 200-299
-  --country-deny <列表>   出口国家黑名单，逗号分隔，如 HK,CN
-  --config <path>         写入哪个配置文件
-  --force                 已存在同名条目时覆盖
-
-示例：
-  afc add Netflix --url https://www.netflix.com/ --expect 200
-  afc add Telegram                       # 用内置预设的判据
-  afc add 我的组                          # 通用可达性判据（只在节点彻底不通时才换）
-`;
 
 /** 解析 --expect：支持 200、200,301,302、200-299。 */
 export function parseExpectedStatus(value: string): number[] {
@@ -66,7 +50,7 @@ export function resolveWritePath(explicit?: string): string {
 export async function run(context: CommandContext): Promise<number> {
   const groupName = context.positionals[0];
   if (!groupName) {
-    process.stderr.write(USAGE);
+    process.stderr.write(ADD_HELP);
     return 64;
   }
 

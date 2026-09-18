@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK, EXIT_USAGE } from '../exit-codes.ts';
 import { ConfigError } from '../config.ts';
+import { COMMAND_HELP, TOP_HELP } from './help.ts';
 import { UsageError } from '../errors.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -16,63 +17,6 @@ function packageVersion(): string {
     return '0.0.0';
   }
 }
-
-const EXIT_CODE_HELP = ([
-  [EXIT_OK, '成功（找到或保持可用节点）'],
-  [EXIT_NO_USABLE_NODE, '未找到可用节点'],
-  [EXIT_ENVIRONMENT, '环境故障（控制端点不可达、内核缺失等）'],
-  [EXIT_USAGE, '用法错误（命令或选项写错、组名未配置等）'],
-] as const)
-  .map(([code, description]) => `  ${String(code).padEnd(2)} ${description}`)
-  .join('\n');
-
-const HELP = `afc — 为 Clash/mihomo 代理组挑选真正可用的节点
-
-用法：afc <命令> [选项]
-
-命令：
-  add              把一个组加入配置，指定它的判据（afc add <组名>）
-  remove           把某个组从配置里移除
-  groups           列出当前订阅实际存在的代理组
-  doctor           体检：探测候选节点并给出判定（不改动当前选择）
-  fix              修复：只把不可用的节点换掉（可用时什么都不做）
-  schedule         定时自动修复：install / uninstall / status
-
-最省事的用法（想让它自己一直好着，就这两条）：
-  afc schedule install     # 每 5 分钟自动体检 + 需要时才换节点，装完不用管
-  afc schedule status      # 看它是否在跑、最近一次做了什么
-
-通用选项：
-  --config <path>     指定配置文件（默认 ./afc.config.yaml 或 ~/.config/afc/config.yaml）
-  --group <name>      只处理指定组（doctor / fix）
-  --all               处理全部"该管的组"（等同默认行为）
-  --no-auto           只处理配置文件里声明过的组，不自动接管其它组
-  --json              以机器可读格式输出
-  --quiet             精简输出：每次运行只留一行（计划任务用）
-  --verbose           额外打印诊断信息（控制器来源、配置路径等）
-  --dry-run           只展示将要执行的改动，不写入
-  --controller <ep>   显式指定控制端点：unix:/path/to.sock 或 127.0.0.1:9090
-  --secret <s>        控制端点认证密钥
-  -h, --help          显示帮助
-  -v, --version       显示版本
-
-示例：
-  afc groups                     # 当前订阅有哪些组、哪些会被处理
-  afc add Netflix                # 把 Netflix 组加入管理（用内置预设判据）
-  afc add 我的组 --url https://example.com/ --expect 200   # 自定义判据
-  afc doctor                     # 体检 GPT 组并打印可用性表格
-  afc doctor --json              # 机器可读输出，便于脚本消费
-  afc fix --group GPT            # 仅在当前节点不可用时才换到可用节点
-  afc schedule install           # 安装周期性修复（默认每 300 秒）
-
-默认处理范围（"该管的组"）：配置里声明过的组，以及你在 Clash 里**手动钉了某个节点**的组。
-不会被改动：指向 DIRECT/REJECT 的组、委托给"自动选择"的组、自动测速类组（这些由内核自己维护）。
-
-说明：本工具只通过 mihomo 控制端点切换代理组的选中节点，不会修改任何 Clash 配置文件。
-
-退出码：
-${EXIT_CODE_HELP}
-`;
 
 interface CommandContext {
   positionals: string[];
@@ -148,7 +92,7 @@ export async function main(argv: string[]): Promise<number> {
       },
     });
   } catch (err) {
-    process.stderr.write(`参数错误：${(err as Error).message}\n\n${HELP}`);
+    process.stderr.write(`参数错误：${(err as Error).message}\n\n${TOP_HELP}`);
     return EXIT_USAGE;
   }
 
@@ -160,14 +104,16 @@ export async function main(argv: string[]): Promise<number> {
     return EXIT_OK;
   }
   if (values.help || command === undefined || command === 'help') {
-    process.stdout.write(HELP);
+    // `afc <命令> --help` 打印该命令的用法；否则打印顶层帮助
+    const commandHelp = command !== undefined && command !== 'help' ? COMMAND_HELP[command] : undefined;
+    process.stdout.write(commandHelp ?? TOP_HELP);
     return EXIT_OK;
   }
 
   const entry = COMMANDS[command];
   if (!entry) {
     const hint = command === 'version' ? '（版本号请用：afc --version 或 afc -v）\n' : '';
-    process.stderr.write(`未知命令：${command}\n${hint}\n${HELP}`);
+    process.stderr.write(`未知命令：${command}\n${hint}\n${TOP_HELP}`);
     return EXIT_USAGE;
   }
 

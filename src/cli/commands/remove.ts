@@ -2,21 +2,13 @@ import { readFileSync } from 'node:fs';
 import { removeTargetFromConfigText, writeConfigText } from '../../config-edit.ts';
 import { loadConfig, targetGroupNames } from '../../config.ts';
 import { EXIT_OK, EXIT_USAGE } from '../../exit-codes.ts';
+import { REMOVE_HELP } from '../help.ts';
 import { optString, type CommandContext } from '../context.ts';
-
-const USAGE = `用法：afc remove <组名> [选项]
-
-把某个组从配置里移除（之后它不再被 afc 处理；若它仍"手动钉着节点"，
-会被自动模式按通用可达性判据接管）。
-
-选项：
-  --config <path>   指定配置文件
-`;
 
 export async function run(context: CommandContext): Promise<number> {
   const groupName = context.positionals[0];
   if (!groupName) {
-    process.stderr.write(USAGE);
+    process.stderr.write(REMOVE_HELP);
     return EXIT_USAGE;
   }
 

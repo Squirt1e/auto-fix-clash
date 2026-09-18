@@ -48,16 +48,43 @@ test('--help 与 help 子命令输出用法', async () => {
     const result = await capture(argv);
     assert.equal(result.code, EXIT_OK);
     assert.match(result.out, /用法：afc <命令>/);
-    // 帮助里应当写明退出码与关键选项
+    // 顶层帮助里应当写明退出码与关键选项
     assert.match(result.out, /--version/);
     assert.match(result.out, /--verbose/);
+    assert.match(result.out, /退出码：0 成功/);
+  }
+});
+
+test('顶层帮助保持精简（避免一次倒出所有细节）', async () => {
+  const { out } = await capture(['--help']);
+  const lines = out.trimEnd().split('\n').length;
+  assert.ok(lines <= 26, `顶层帮助过长：${lines} 行`);
+  // 细节应放到各命令自己的帮助里
+  assert.doesNotMatch(out, /--country-deny/);
+  assert.doesNotMatch(out, /--interval/);
+});
+
+test('afc <命令> --help 打印该命令的用法', async () => {
+  const cases: [string, RegExp][] = [
+    ['add', /用法：afc add <组名>/],
+    ['remove', /用法：afc remove <组名>/],
+    ['groups', /用法：afc groups/],
+    ['doctor', /用法：afc doctor/],
+    ['fix', /用法：afc fix/],
+    ['schedule', /用法：afc schedule <install\|uninstall\|status>/],
+  ];
+  for (const [command, pattern] of cases) {
+    const result = await capture([command, '--help']);
+    assert.equal(result.code, EXIT_OK, `${command} --help 应成功`);
+    assert.match(result.out, pattern, `${command} --help 应打印自己的用法`);
   }
 });
 
 test('帮助里的退出码按数字升序排列且与实现一致', async () => {
   const { out } = await capture(['--help']);
-  const section = out.slice(out.indexOf('退出码：'));
-  const codes = [...section.matchAll(/^\s+(\d+)\s/gm)].map((m) => Number(m[1]));
+  const line = out.split('\n').find((l) => l.startsWith('退出码：'));
+  assert.ok(line, '帮助里应有退出码一行');
+  const codes = [...line.matchAll(/(\d+)/g)].map((m) => Number(m[1]));
   assert.deepEqual(codes, [EXIT_OK, EXIT_NO_USABLE_NODE, EXIT_ENVIRONMENT, EXIT_USAGE]);
   assert.deepEqual(codes, [...codes].sort((a, b) => a - b), '应按数值升序列出');
 });

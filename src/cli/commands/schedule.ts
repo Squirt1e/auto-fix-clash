@@ -14,6 +14,7 @@ import {
   uninstallSchedule,
 } from '../../schedule/launchd.ts';
 import { optBoolean, optNumber, optString, type CommandContext } from '../context.ts';
+import { SCHEDULE_HELP } from '../help.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -36,18 +37,6 @@ function resolveCliEntry(): string {
   const ext = import.meta.url.endsWith('.ts') ? '.ts' : '.js';
   return join(HERE, '..', `index${ext}`);
 }
-
-const USAGE = `用法：afc schedule <install|uninstall|status> [选项]
-
-  install     安装周期性修复任务（默认每 300 秒，可用 --interval 调整）
-  uninstall   移除任务并删除本工具产生的日志
-  status      查看任务是否已载入、间隔与最近一次运行情况
-
-选项：
-  --interval <seconds>  运行间隔（>= 60）
-  --config <path>       指定配置文件（会写入计划任务，供后台运行时使用）
-  --dry-run             只展示将要写入的 plist，不执行安装
-`;
 
 export async function run(context: CommandContext): Promise<number> {
   const action = context.positionals[0] ?? 'status';
@@ -125,7 +114,7 @@ export async function run(context: CommandContext): Promise<number> {
     }
 
     default:
-      process.stderr.write(`未知的 schedule 子命令：${action}\n\n${USAGE}`);
+      process.stderr.write(`未知的 schedule 子命令：${action}\n\n${SCHEDULE_HELP}`);
       return EXIT_USAGE;
   }
 }
