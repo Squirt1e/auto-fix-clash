@@ -1,0 +1,52 @@
+name: Publish to npm
+
+# 触发：推送 v* 标签（例如 v1.0.1）时自动发布；也可在 Actions 页面手动触发
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC：trusted publishing 与 provenance 必需
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm typecheck
+      - run: pnpm test
+
+      # 防止 tag 与 package.json 版本不一致导致发错版本
+      - name: 校验 tag 与 package.json 版本一致
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          echo "tag=$TAG  package.json=$PKG"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag（$TAG）与 package.json（$PKG）不一致，已中止"
+            exit 1
+          fi
+
+      # trusted publishing 要求 npm >= 11.5.1
+      - run: npm install -g npm@latest
+      - run: npm --version
+
+      # 发布：OIDC 自动认证，无需任何 token；--provenance 生成来源签名
+      - run: npm publish --provenance --access public
