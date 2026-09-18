@@ -158,7 +158,6 @@ export const PROFILE_SUBDIR_NAMES = ['profiles', 'profile', 'subscriptions'] as 
 export function kernelCandidates(ctx: PlatformContext): string[] {
   const j = joinFor(ctx);
   const exe = isWindows(ctx) ? 'mihomo.exe' : 'mihomo';
-  const names = isWindows(ctx) ? ['verge-mihomo.exe', 'mihomo.exe', 'clash-meta.exe'] : ['mihomo', 'verge-mihomo', 'clash-meta'];
   const out: string[] = [];
 
   if (ctx.platform === 'darwin') {
@@ -197,7 +196,8 @@ export function kernelCandidates(ctx: PlatformContext): string[] {
       j(xdgConfigHome(ctx), 'mihomo', 'mihomo'),
     );
   }
-  return [...new Set([...out, ...names.map((n) => n)])].filter((p) => p.includes('/') || p.includes('\\'));
+  // 裸命令名不在这里处理：PATH 查找由 findKernelBinary 用 which/where 负责。
+  return [...new Set(out)];
 }
 
 /** 用于在 PATH 里查找内核的命令名。 */
