@@ -131,17 +131,25 @@ export class ProbeEngine {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const endpoints: EndpointObservation[] = [];
+      let inlineGeoBody: string | undefined;
       for (const [index, endpoint] of [target.probe, ...target.extraProbes].entries()) {
-        const { observation: endpointObservation } = await this.hit(channel, endpoint, timeoutMs);
-        endpoints.push(endpointObservation);
+        // 主判据与出口探测是同一个地址时（通用可达性判据就是这种情形），
+        // 直接复用这次响应的正文，省掉一次重复请求。
+        const wantBody = target.geoProbe !== undefined && endpoint.url === target.geoProbe.url;
+        const hit = await this.hit(channel, endpoint, timeoutMs, wantBody);
+        endpoints.push(hit.observation);
+        if (wantBody && hit.body !== undefined) inlineGeoBody = hit.body;
         // fail-fast：主端点连 HTTP 响应都拿不到，说明这个出口不通，
         // 再打附加端点只会白等一次超时（死节点场景下可省一半时间）。
-        if (index === 0 && endpointObservation.statusCode === undefined) break;
+        if (index === 0 && hit.observation.statusCode === undefined) break;
       }
 
       let geo: GeoObservation | undefined;
-      // 只有拿到过 HTTP 响应才值得再取出口信息；死节点直接跳过以省一次请求。
-      if (endpoints.some((e) => e.statusCode !== undefined) && target.geoProbe) {
+      if (inlineGeoBody !== undefined) {
+        const parsed = parseTrace(inlineGeoBody);
+        if (Object.keys(parsed).length > 0) geo = parsed;
+      } else if (endpoints.some((e) => e.statusCode !== undefined) && target.geoProbe) {
+        // 只有拿到过 HTTP 响应才值得再取出口信息；死节点直接跳过以省一次请求。
         const geoHit = await this.hit(
           channel,
           { url: target.geoProbe.url, expectedStatus: [200] },

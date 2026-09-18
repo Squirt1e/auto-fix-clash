@@ -1,5 +1,5 @@
 import { isGroup } from '../../controller/client.ts';
-import { targetGroupNames } from '../../config.ts';
+import { expandAutoTargets } from '../../targets/auto.ts';
 import { EXIT_ENVIRONMENT, EXIT_OK } from '../../exit-codes.ts';
 import { runtimeConfigPathCandidates } from '../../paths.ts';
 import { pad } from '../format.ts';
@@ -32,10 +32,10 @@ export async function run(context: CommandContext): Promise<number> {
     return EXIT_ENVIRONMENT;
   }
 
-  const managedBy = new Map<string, string>();
-  for (const target of runtime.config.targets) {
-    for (const groupName of targetGroupNames(target)) managedBy.set(groupName, target.name);
-  }
+  // 用与 fix/doctor 相同的判定逻辑，保证"表格里显示会被管"与"真的会被管"一致
+  const expansion = expandAutoTargets(runtime.config.targets, all);
+  const autoByGroup = new Map(expansion.targets.map((t) => [t.groupName, t.source]));
+  const configuredGroups = new Set(runtime.config.targets.map((t) => t.name));
 
   const rows = groups
     .map(([name, info]) => ({
@@ -43,9 +43,8 @@ export async function run(context: CommandContext): Promise<number> {
       typeLabel: GROUP_TYPE_LABEL[info.type] ?? info.type,
       members: (info.all ?? []).length,
       current: info.now ?? '—',
-      /** 若该组是某个目标的组名或别名，记录它归属的目标。 */
-      managed: managedBy.get(name),
-      configured: managedBy.has(name),
+      managed: autoByGroup.has(name),
+      configured: autoByGroup.get(name) === 'configured',
       /** 是否为可被可靠切换的类型（只有手动选择组可以）。 */
       switchable: info.type === 'Selector',
     }))
@@ -67,9 +66,10 @@ export async function run(context: CommandContext): Promise<number> {
     return EXIT_OK;
   }
 
+  const verbose = optBoolean(context.values, 'verbose');
   // 诊断信息（控制器/配置路径从哪来）只在 --verbose 时打印：
-  // 常规使用只需要"有哪些组、哪些已受管理"。
-  if (optBoolean(context.values, 'verbose')) {
+  // 常规使用只需要"有哪些组、哪些会被处理"。
+  if (verbose) {
     const configPath = runtimeConfigPathCandidates(runtime.config.probe.runtimeConfigPath)[0];
     process.stdout.write(
       `afc 配置：${runtime.config.sourcePath ?? '（未使用配置文件，采用内置默认）'}\n` +
@@ -85,7 +85,7 @@ export async function run(context: CommandContext): Promise<number> {
   process.stdout.write('-'.repeat(70) + '\n');
   for (const r of rows) {
     // 只有手动选择组能被可靠指定成员；自动选择型组会被内核下次体检覆盖
-    const manageState = r.configured ? '是' : r.switchable ? '否' : '不可切换';
+    const manageState = r.configured ? '是' : r.managed ? '自动' : r.switchable ? '否' : '不可切换';
     process.stdout.write(
       pad(r.name, 24) +
       pad(r.typeLabel, 10) +
@@ -94,10 +94,13 @@ export async function run(context: CommandContext): Promise<number> {
     );
   }
 
-  if (rows.some((r) => !r.configured && r.switchable)) {
+  if (verbose && expansion.skipped.length > 0) {
     process.stdout.write(
-      '\n让某个组也受管理：在 afc.config.yaml 的 targets 里加一条（组名照抄上表），详见 README。\n',
+      '\n不会被处理的组：\n' +
+      expansion.skipped.map((s) => `  ${s.groupName}：${s.reason}`).join('\n') + '\n',
     );
+  } else if (rows.some((r) => !r.managed && r.switchable)) {
+    process.stdout.write('\n标「否」的组不会被处理（--verbose 查看原因，或用 targets 显式声明）。\n');
   }
   return EXIT_OK;
 }

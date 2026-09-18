@@ -3,6 +3,24 @@
 机场节点经常失效，而"哪个节点能用"没法靠名称或延迟判断。afc 直接请求目标站点、读它的**真实响应**，
 挑出能用的节点；当前节点坏掉时自动换掉。
 
+## 不想了解细节，只想让它一直好着
+
+```bash
+afc schedule install     # 装完就不用管：每 5 分钟自动体检，节点坏了自己换
+afc schedule status      # 想确认时看一眼它在不在跑、最近做了什么
+```
+
+装之前想先看看它会动哪些组：
+
+```bash
+afc fix --dry-run --verbose
+```
+
+**默认处理范围不用你配**：你在 Clash 里**手动钉了某个节点**的组（比如把 GPT 组钉在某个节点上 ——
+这类组坏了内核不会替你换）。指向 `DIRECT`/`REJECT` 的组、以及委托给"自动选择"的组都不会被碰。
+
+不满意就一条命令撤掉：`afc schedule uninstall`（全程不改你的 Clash 配置）。
+
 ## 它解决什么问题
 
 用真实订阅实测出来的三件事：
@@ -43,6 +61,20 @@ GPT：已切换 [Normal x0.5] 日本 02 → [Normal x0.5] 日本 03
 ```bash
 $ afc fix --group GPT
 GPT：保持 [Normal x0.5] 日本 03（可用）
+```
+
+想让它一直自动做这件事（装一次，之后你什么都不用管）：
+
+```bash
+$ afc schedule install
+已安装周期性修复任务：每 300 秒运行一次（已载入并触发一次试跑。）
+  任务定义：~/Library/LaunchAgents/com.auto-fix-clash.heal.plist
+  运行日志：~/Library/Logs/afc/heal.log
+
+$ afc schedule status
+周期性修复任务：运行中，每 300 秒
+  最近一次：2026-09-18 13:50:55 GPT：保持 [Normal x0.5] 日本 03（可用）
+  卸载：afc schedule uninstall　（--verbose 查看路径与显示名）
 ```
 
 ## 安装
@@ -139,7 +171,10 @@ afc <命令> --verbose          # 额外打印诊断信息（控制器来源、�
 
 ### 给别的组也加上保护
 
-只改 `afc.config.yaml`，不用改代码：
+绝大多数情况不用配 —— 你在 Clash 里手动钉了节点的组会被自动接管（用通用可达性判据：
+只在节点彻底不通时才换，不会把你特意选的地区换掉）。
+
+想让某个组按**站点级判据**来判（更准，比如"这个出口能不能被 OpenAI 接受"），在 `afc.config.yaml` 里加一条：
 
 ```yaml
 targets:

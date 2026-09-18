@@ -1,11 +1,9 @@
-import { isGroup, isRealNode } from '../../controller/client.ts';
-import { findGroupName } from '../../config.ts';
-import { TargetGroupMissingError } from '../../heal/repair.ts';
-import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK } from '../../exit-codes.ts';
+import { isRealNode } from '../../controller/client.ts';
+import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK, EXIT_USAGE } from '../../exit-codes.ts';
 import { describeEndpoints, ProbeEngine, type NodeProbeResult } from '../../probe/engine.ts';
 import { loadNodeDefinitions } from '../../heal/repair.ts';
 import { pad, formatMs, interactive, clearProgressLine } from '../format.ts';
-import { isQuiet, openRuntime, targetsFor } from '../runtime.ts';
+import { isQuiet, openRuntime, planTargets } from '../runtime.ts';
 import { optBoolean, type CommandContext } from '../context.ts';
 
 const VERDICT_LABEL: Record<NodeProbeResult['verdict'], string> = {
@@ -28,7 +26,7 @@ export async function run(context: CommandContext): Promise<number> {
   const json = optBoolean(context.values, 'json');
   const verbose = optBoolean(context.values, 'verbose');
   const runtime = await openRuntime(context);
-  const targets = targetsFor(runtime, context);
+  const targets = runtime.config.targets;
   const client = runtime.controller.client;
 
   const allProxies = await client.proxies();
@@ -37,32 +35,23 @@ export async function run(context: CommandContext): Promise<number> {
   let anyUsable = false;
   let anyProbed = false;
 
-  const availableGroups = Object.entries(allProxies)
-    .filter(([, info]) => isGroup(info))
-    .map(([name]) => name);
-
-  // 先把每个目标解析成具体组，并收集所有需要节点定义的成员名 ——
-  // 再据此挑选「当前生效」的节点定义文件（多订阅/多客户端下这一步很关键）。
-  interface PlannedTarget { target: (typeof targets)[number]; groupName: string; groupCandidates: string[] }
-  const planned: PlannedTarget[] = [];
-  for (const target of targets) {
-    const groupName = findGroupName(target, availableGroups);
-    if (!groupName) {
-      // 多订阅切换后组名对不上是正常情况：多目标时跳过，单目标时直接报错并给指引
-      if (targets.length > 1) {
-        process.stderr.write(`${target.name}: 跳过（当前订阅没有这个组）\n`);
-        report.push({ group: target.name, missing: true, verdicts: [] });
-        continue;
-      }
-      throw new TargetGroupMissingError(target, availableGroups);
-    }
-    const groupInfo = allProxies[groupName]!;
-    planned.push({
-      target,
-      groupName,
-      groupCandidates: (groupInfo.all ?? []).filter((name) => isRealNode(allProxies[name])),
-    });
+  // 决定这次体检哪些组：--group 指定单个；默认自动模式（配置的组 + 手动钉了节点的组）
+  const { plans, skipped: skippedPlans } = await planTargets(runtime, context, client, allProxies);
+  if (plans.length === 0) {
+    process.stderr.write(
+      skippedPlans.length > 0
+        ? `没有可体检的组：\n${skippedPlans.map((s) => `  ${s.groupName}：${s.reason}`).join('\n')}\n`
+        : '没有可体检的组。用 afc groups 查看当前订阅的代理组。\n',
+    );
+    return EXIT_USAGE;
   }
+
+  const planned = plans.map((plan) => ({
+    target: plan.target,
+    groupName: plan.groupName,
+    note: plan.note,
+    groupCandidates: (allProxies[plan.groupName]?.all ?? []).filter((name) => isRealNode(allProxies[name])),
+  }));
 
   const needed = [...new Set(planned.flatMap((p) => p.groupCandidates))];
   const definitions = loadNodeDefinitions({
@@ -70,7 +59,7 @@ export async function run(context: CommandContext): Promise<number> {
     neededNodeNames: needed,
   });
 
-  for (const { target, groupName, groupCandidates: groupInfoCandidates } of planned) {
+  for (const { target, groupName, groupCandidates: groupInfoCandidates, note } of planned) {
     const groupInfo = allProxies[groupName]!;
     const candidates = groupInfoCandidates.filter((name) => definitions.nodeNames.includes(name));
 
@@ -97,7 +86,7 @@ export async function run(context: CommandContext): Promise<number> {
         // 判据与并发这类实现细节只在 --verbose 时展示
         if (verbose) {
           process.stdout.write(
-            `  判据：${describeEndpoints(target)}\n` +
+            `  判据：${describeEndpoints(target)}（${note}）\n` +
             `  并发上限：${runtime.config.probe.concurrency}\n`,
           );
         }
@@ -169,6 +158,12 @@ export async function run(context: CommandContext): Promise<number> {
 
   if (json) {
     process.stdout.write(JSON.stringify({ controller: runtime.controller.endpoint, targets: report }, null, 2) + '\n');
+  } else if (skippedPlans.length > 0) {
+    if (verbose) {
+      process.stdout.write(`\n未体检的组：\n${skippedPlans.map((s) => `  ${s.groupName}：${s.reason}`).join('\n')}\n`);
+    } else {
+      process.stdout.write(`\n另有 ${skippedPlans.length} 个组未体检（--verbose 查看原因）。\n`);
+    }
   }
 
   if (!anyProbed) return EXIT_ENVIRONMENT;

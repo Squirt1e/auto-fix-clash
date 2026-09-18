@@ -74,7 +74,8 @@ export async function run(context: CommandContext): Promise<number> {
       process.stdout.write(
         `已安装周期性修复任务：每 ${interval} 秒运行一次（${result.message}）\n` +
         `  任务定义：${result.plistPath}\n` +
-        `  运行日志：${result.logPath}\n\n` +
+        `  运行日志：${result.logPath}\n` +
+        '  处理范围：配置里声明的组 + 你在 Clash 里手动钉了节点的组\n\n' +
         '提示：系统「App 后台活动」里它会显示为「' + describeProgramIdentity().displayName + '」\n' +
         '      （执行的是 node，macOS 按代码签名主体归类），不代表装了别的软件。\n' +
         '      查看/关闭：系统设置 → 通用 → 登录项与扩展\n' +

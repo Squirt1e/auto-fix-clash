@@ -1,5 +1,7 @@
-import { loadConfig, requireTarget, type AfcConfig, type TargetConfig } from '../config.ts';
+import { findGroupName, loadConfig, requireTarget, type AfcConfig, type TargetConfig } from '../config.ts';
+import { isGroup, type MihomoClient, type ProxyInfo } from '../controller/client.ts';
 import { discoverController, type DiscoveredController } from '../controller/discovery.ts';
+import { expandAutoTargets } from '../targets/auto.ts';
 import { optBoolean, optString, resolveTargets, type CommandContext } from './context.ts';
 
 export interface Runtime {
@@ -26,4 +28,74 @@ export function targetsFor(runtime: Runtime, context: CommandContext): TargetCon
 
 export function isQuiet(context: CommandContext): boolean {
   return optBoolean(context.values, 'quiet');
+}
+
+export interface TargetPlan {
+  groupName: string;
+  target: TargetConfig;
+  /** configured / preset / generic */
+  source: string;
+  note: string;
+}
+
+export interface PlannedTargets {
+  plans: TargetPlan[];
+  /** 未被纳入的组及原因（--verbose 时展示，避免默认输出刷屏）。 */
+  skipped: { groupName: string; reason: string }[];
+}
+
+/**
+ * 决定这次要处理哪些组。
+ *
+ * - `--group X`：只处理 X（必须在配置里声明过）
+ * - 默认 / `--all`：自动模式 —— 配置里声明的组 + 当前手动钉了节点的手动选择组
+ * - `--no-auto`：只处理配置里声明的组
+ */
+export async function planTargets(
+  runtime: Runtime,
+  context: CommandContext,
+  client: MihomoClient,
+  /** 已获取的 /proxies 结果，避免重复请求。 */
+  knownProxies?: Record<string, ProxyInfo>,
+): Promise<PlannedTargets> {
+  const group = optString(context.values, 'group');
+  const config = runtime.config;
+
+  if (group) {
+    const target = requireTarget(config, group);
+    return {
+      plans: [{ groupName: target.name, target, source: 'configured', note: '配置里声明的判据' }],
+      skipped: [],
+    };
+  }
+
+  const proxies = knownProxies ?? await client.proxies();
+  const groupNames = Object.entries(proxies)
+    .filter(([, info]) => isGroup(info))
+    .map(([name]) => name);
+
+  if (optBoolean(context.values, 'no-auto')) {
+    const plans: TargetPlan[] = [];
+    const skipped: { groupName: string; reason: string }[] = [];
+    for (const target of config.targets) {
+      const groupName = findGroupName(target, groupNames);
+      if (!groupName) {
+        skipped.push({ groupName: target.name, reason: '当前订阅里没有这个组' });
+        continue;
+      }
+      plans.push({ groupName, target: { ...target, name: groupName }, source: 'configured', note: '配置里声明的判据' });
+    }
+    return { plans, skipped };
+  }
+
+  const expansion = expandAutoTargets(config.targets, proxies);
+  return {
+    plans: expansion.targets.map((t) => ({
+      groupName: t.groupName,
+      target: t.target,
+      source: t.source,
+      note: t.note,
+    })),
+    skipped: expansion.skipped,
+  };
 }

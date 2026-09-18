@@ -1,8 +1,8 @@
 import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK, EXIT_USAGE } from '../../exit-codes.ts';
 import { UsageError } from '../../errors.ts';
-import { GroupNotSwitchableError, TargetGroupMissingError, repairTarget, type RepairOutcome } from '../../heal/repair.ts';
+import { GroupNotSwitchableError, repairTarget, type RepairOutcome } from '../../heal/repair.ts';
 import { interactive } from '../format.ts';
-import { isQuiet, openRuntime, targetsFor } from '../runtime.ts';
+import { isQuiet, openRuntime, planTargets } from '../runtime.ts';
 import { optBoolean, type CommandContext } from '../context.ts';
 
 function timestamp(): string {
@@ -29,18 +29,26 @@ export async function run(context: CommandContext): Promise<number> {
   const verbose = optBoolean(context.values, 'verbose');
   const dryRun = optBoolean(context.values, 'dry-run');
   const runtime = await openRuntime(context);
-  const targets = targetsFor(runtime, context);
   const client = runtime.controller.client;
+
+  const { plans, skipped: skippedPlans } = await planTargets(runtime, context, client);
+  if (plans.length === 0) {
+    process.stderr.write(
+      skippedPlans.length > 0
+        ? `没有可处理的组：\n${skippedPlans.map((s) => `  ${s.groupName}：${s.reason}`).join('\n')}\n`
+        : '没有可处理的组。用 afc groups 查看当前订阅的代理组。\n',
+    );
+    return EXIT_USAGE;
+  }
 
   const outcomes: RepairOutcome[] = [];
   const failures: { group: string; error: Error }[] = [];
-  const skipped: { group: string; error: Error }[] = [];
 
-  for (const target of targets) {
+  for (const plan of plans) {
     try {
       const outcome = await repairTarget({
         config: runtime.config,
-        target,
+        target: plan.target,
         client,
         ...(runtime.config.probe.runtimeConfigPath
           ? { runtimeConfigPath: runtime.config.probe.runtimeConfigPath }
@@ -58,45 +66,40 @@ export async function run(context: CommandContext): Promise<number> {
         process.stdout.write(`${timestamp()} ${summary}\n`);
       } else {
         process.stdout.write(summary + '\n');
-        // 详细的判定依据只在 --verbose 时展开
-        if (verbose) process.stdout.write(`  依据：${outcome.plan.reason}\n`);
+        // 详细依据只在 --verbose 时展开
+        if (verbose) {
+          process.stdout.write(`  判据：${plan.note}\n`);
+          process.stdout.write(`  依据：${outcome.plan.reason}\n`);
+        }
       }
     } catch (err) {
       const error = err as Error;
-      // 组不存在于当前订阅：多订阅场景下的正常情况，跳过而不是整体失败
-      if (error instanceof TargetGroupMissingError) {
-        skipped.push({ group: target.name, error });
-        const line = `${target.name}：跳过（当前订阅没有这个组）`;
-        process.stdout.write(quiet ? `${timestamp()} ${line}\n` : `${line}\n`);
-        if (verbose) process.stderr.write(`${error.message}\n`);
-        continue;
-      }
-      failures.push({ group: target.name, error });
+      failures.push({ group: plan.groupName, error });
       if (error instanceof GroupNotSwitchableError) {
-        if (quiet) process.stdout.write(`${timestamp()} ${target.name}: 跳过（组类型不可切换）\n`);
-        else process.stdout.write(`${target.name}：跳过（组类型不可切换，详见 --verbose）\n`);
+        if (quiet) process.stdout.write(`${timestamp()} ${plan.groupName}: 跳过（组类型不可切换）\n`);
+        else process.stdout.write(`${plan.groupName}：跳过（组类型不可切换）\n`);
         if (verbose) process.stderr.write(`${error.message}\n`);
       } else if (quiet) {
         // 精简模式只把一行摘要写到 stdout（计划任务的日志），
         // 完整错误写到 stderr，保留事后排查所需的细节。
-        process.stdout.write(`${timestamp()} ${target.name}: 执行失败 — ${error.message.split('\n')[0]}\n`);
-        process.stderr.write(`${timestamp()} ${target.name} 执行失败：\n${error.stack ?? error.message}\n`);
+        process.stdout.write(`${timestamp()} ${plan.groupName}: 执行失败 — ${error.message.split('\n')[0]}\n`);
+        process.stderr.write(`${timestamp()} ${plan.groupName} 执行失败：\n${error.stack ?? error.message}\n`);
       } else {
-        process.stderr.write(`${target.name}：执行失败 — ${error.message}\n`);
+        process.stderr.write(`${plan.groupName}：执行失败 — ${error.message}\n`);
       }
     }
   }
 
-  // 一个组都没能处理：区分「用法/配置问题」与「环境故障」，便于脚本正确告警
-  if (outcomes.length === 0) {
-    // 全部目标都只是"当前订阅里没有" → 这是配置与订阅不匹配，属于用法问题
-    if (skipped.length === targets.length && targets.length > 0) {
-      const first = skipped[0]!.error;
-      process.stderr.write(
-        `\n当前订阅里没有任何已配置的目标组。\n${first.message}\n`,
-      );
-      return EXIT_USAGE;
+  // 哪些组没被纳入：默认只说个数量，避免刷屏
+  if (skippedPlans.length > 0 && !quiet) {
+    if (verbose) {
+      process.stdout.write(`\n未处理的组：\n${skippedPlans.map((s) => `  ${s.groupName}：${s.reason}`).join('\n')}\n`);
+    } else {
+      process.stdout.write(`\n另有 ${skippedPlans.length} 个组未纳入（--verbose 查看原因）。\n`);
     }
+  }
+
+  if (outcomes.length === 0) {
     return failures.length > 0 && failures.every((f) => f.error instanceof UsageError)
       ? EXIT_USAGE
       : EXIT_ENVIRONMENT;
