@@ -40,7 +40,26 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - run: pnpm typecheck
-      - run: pnpm test
+
+      # 失败时把「哪些用例挂了 + 断言细节」做成注解：
+      # 日志要在有权限的情况下才能看，而注解是公开可读的
+      - name: 运行测试
+        shell: bash
+        run: |
+          set +e
+          pnpm test 2>&1 | tee test-output.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" != "0" ]; then
+            {
+              echo "失败用例："
+              grep -E '^✖' test-output.log | sort -u | head -15
+              echo "--- 断言细节 ---"
+              grep -B1 -A6 'AssertionError\|Error:' test-output.log | head -50
+            } > failure-summary.txt
+            msg=$(head -c 3500 failure-summary.txt | sed ':a;N;$!ba;s/\n/%0A/g')
+            echo "::error title=${{ matrix.os }} 测试失败::$msg"
+            exit "$code"
+          fi
 
   publish:
     name: 发布到 npm
