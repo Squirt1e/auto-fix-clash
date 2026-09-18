@@ -418,9 +418,8 @@ export function loadConfig(explicitPath?: string): AfcConfig {
       .map((t, i) => normalizeTarget(t, i, problems))
       .filter((t): t is TargetConfig => t !== undefined);
   }
-  if (rawTargets !== undefined && targets.length === 0) {
-    problems.push('targets 为空：至少需要配置一个目标组');
-  }
+  // 显式的 `targets: []` 是合法状态：表示"不在配置里声明任何目标"，
+  // 此时只按自动模式处理（你用 Clash 手动钉了节点的组）。
 
   // 组名与别名不允许跨目标重复：否则一个组会同时被两个目标管理，行为不可预期
   const seen = new Map<string, string>();

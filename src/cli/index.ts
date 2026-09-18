@@ -31,6 +31,8 @@ const HELP = `afc — 为 Clash/mihomo 代理组挑选真正可用的节点
 用法：afc <命令> [选项]
 
 命令：
+  add              把一个组加入配置，指定它的判据（afc add <组名>）
+  remove           把某个组从配置里移除
   groups           列出当前订阅实际存在的代理组
   doctor           体检：探测候选节点并给出判定（不改动当前选择）
   fix              修复：只把不可用的节点换掉（可用时什么都不做）
@@ -55,7 +57,9 @@ const HELP = `afc — 为 Clash/mihomo 代理组挑选真正可用的节点
   -v, --version       显示版本
 
 示例：
-  afc groups                     # 当前订阅有哪些组？--group 该写什么？
+  afc groups                     # 当前订阅有哪些组、哪些会被处理
+  afc add Netflix                # 把 Netflix 组加入管理（用内置预设判据）
+  afc add 我的组 --url https://example.com/ --expect 200   # 自定义判据
   afc doctor                     # 体检 GPT 组并打印可用性表格
   afc doctor --json              # 机器可读输出，便于脚本消费
   afc fix --group GPT            # 仅在当前节点不可用时才换到可用节点
@@ -84,6 +88,8 @@ const loadCommand = (name: string): Promise<{ run: CommandHandler }> =>
 const COMMANDS: Record<string, { summary: string; run: () => Promise<CommandHandler> }> = {
   doctor: { summary: '体检目标组的候选节点', run: async () => (await loadCommand('doctor')).run },
   fix: { summary: '按粘性策略修复代理组', run: async () => (await loadCommand('fix')).run },
+  add: { summary: '把一个组加入配置', run: async () => (await loadCommand('add')).run },
+  remove: { summary: '把某个组从配置里移除', run: async () => (await loadCommand('remove')).run },
   groups: { summary: '列出当前订阅的代理组（用于确定 --group 该写什么）', run: async () => (await loadCommand('groups')).run },
   schedule: { summary: '管理周期性修复任务', run: async () => (await loadCommand('schedule')).run },
 };
@@ -132,6 +138,10 @@ export async function main(argv: string[]): Promise<number> {
         controller: { type: 'string' },
         secret: { type: 'string' },
         interval: { type: 'string' },
+        url: { type: 'string' },
+        expect: { type: 'string' },
+        'country-deny': { type: 'string' },
+        force: { type: 'boolean', default: false },
         verbose: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
         version: { type: 'boolean', short: 'v', default: false },

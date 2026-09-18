@@ -142,7 +142,7 @@ afc 配置：/Users/you/auto-fix-clash/afc.config.yaml
 
 ```bash
 afc schedule install     # 每 5 分钟自动体检 + 需要时才切换
-afc schedule status      # 看它是否在跑、最近一次的结果
+afc schedule status      # 看它是否在跑、最近一次做了什么
 afc schedule uninstall   # 彻底移除
 ```
 
@@ -155,13 +155,16 @@ afc schedule uninstall   # 彻底移除
 ### 想看看 / 想手动修
 
 ```bash
-afc groups                    # 当前订阅有哪些组？（确定 --group 该写什么）
-afc doctor                    # 体检（默认第一个已配置的组）
-afc doctor --group GPT        # 指定组
+afc groups                    # 当前订阅有哪些组、哪些会被处理
+afc add Netflix               # 把某个组加入管理（用内置预设的判据）
+afc remove Netflix            # 从配置里移除
+afc doctor                    # 体检"该管的组"（默认范围见下）
+afc doctor --group GPT        # 只体检指定组
 afc doctor --json             # 机器可读，可直接喂给 jq
-afc fix --group GPT           # 只在当前节点不可用时才换
-afc fix --all                 # 照顾所有已配置的组
+afc fix                       # 修复"该管的组"：可用就不动，不可用才换
+afc fix --group GPT           # 只修指定组
 afc fix --dry-run             # 只看会怎么切，不动
+afc fix --no-auto             # 只处理配置文件里声明过的组
 afc -v / afc --version        # 版本号
 afc <命令> --verbose          # 额外打印诊断信息（控制器来源、配置路径、判定依据）
 ```
@@ -169,25 +172,45 @@ afc <命令> --verbose          # 额外打印诊断信息（控制器来源、�
 输出默认保持简洁：体检是「一行表头 + 一张表 + 一行汇总」，修复每次只打印一行结果；
 进度提示只在终端里以单行覆盖显示，管道和日志里不会出现噪音。
 
-### 给别的组也加上保护
+### 默认会处理哪些组
 
-绝大多数情况不用配 —— 你在 Clash 里手动钉了节点的组会被自动接管（用通用可达性判据：
-只在节点彻底不通时才换，不会把你特意选的地区换掉）。
+| 组的状态 | 是否处理 | 为什么 |
+|---|---|---|
+| 你在 Clash 里手动钉了某个节点 | ✅ 处理 | 这类组坏了内核不会替你换，正是需要 afc 的地方 |
+| 配置文件里显式声明过 | ✅ 处理 | 用你指定的判据 |
+| 指向 `DIRECT` / `REJECT`（如 `Bilibili`、`去广告`） | ❌ 不碰 | 这是你有意设置的，改了会破坏你的路由 |
+| 委托给其它组（如 `Youtube → Proxy → 自动选择`） | ❌ 不碰 | 内核的自动测速已经在维护它 |
+| 自动测速类组（`URLTest` / `Fallback`） | ❌ 不碰 | 成员由内核自己维护，手动指定会被覆盖 |
 
-想让某个组按**站点级判据**来判（更准，比如"这个出口能不能被 OpenAI 接受"），在 `afc.config.yaml` 里加一条：
+`afc groups --verbose` 会逐组给出原因，`afc fix --dry-run --verbose` 可以先预演。
 
-```yaml
-targets:
-  - name: Youtube                     # 组名，要和 Clash 里的组名对得上
-    aliases: [🎬媒体解锁, Youtube专用]   # 可选：别的订阅里的叫法
-    probe:
-      url: https://www.youtube.com/generate_204
-      expectedStatus: [204]           # 该站点"能用"时的响应码
-    geoProbe:
-      url: https://www.youtube.com/cdn-cgi/trace
-      format: cloudflare-trace
-    countryDeny: [CN]                 # 出口国家黑名单（可选）
+### 看完 `afc groups`，想把某个组也加进来
+
+上面标 `否` 的组，一条命令加进来即可：
+
+```bash
+afc add Netflix
 ```
+
+判据会自动挑：命中内置预设就用预设的（GPT / Telegram / Google / Github），
+没有预设就用通用可达性判据（只在节点彻底不通时才换，不会把你特意选的地区换掉）。
+想用更准的判据就自己指定：
+
+```bash
+afc add Netflix --url https://www.netflix.com/ --expect 200,301
+afc add 我的组 --url https://example.com/generate_204 --expect 204 --country-deny HK,CN
+```
+
+加完验证一下，之后不用管 —— 计划任务会自动用上新配置：
+
+```bash
+afc doctor --group Netflix
+```
+
+移除用 `afc remove Netflix`。
+
+> `afc add` 只增删你指定的那一条，**不会重排或删除配置文件里已有的内容和注释**；
+> 写入前会先校验，校验不通过就不落盘。
 
 ## 我的客户端不是 Clash Party，能用吗
 
