@@ -12,7 +12,7 @@ afc 帮你自动挑节点：**直接请求目标站点、看它的真实响应**
 ## 快速开始
 
 ```bash
-npm i -g auto-fix-clash   # 要求 macOS + Node.js ≥ 20
+npm i -g auto-fix-clash   # 要求 macOS + Node.js ≥ 20（包地址：https://www.npmjs.com/package/auto-fix-clash）
 afc schedule install      # 装完就不用管：每 5 分钟自动检查，节点坏了自己换
 ```
 
@@ -124,7 +124,7 @@ afc -v                    # 版本号
 ## 从源码安装 / 开发
 
 ```bash
-git clone <仓库地址> auto-fix-clash && cd auto-fix-clash
+git clone https://github.com/Squirt1e/auto-fix-clash.git && cd auto-fix-clash
 pnpm install
 pnpm build
 pnpm add -g .         # 装成全局命令，改完代码立即生效
