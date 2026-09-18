@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { main } from '../src/cli/index.ts';
-import { EXIT_OK, EXIT_USAGE } from '../src/exit-codes.ts';
+import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK, EXIT_USAGE } from '../src/exit-codes.ts';
 
 /** 捕获 main() 写到 stdout/stderr 的内容。 */
 async function capture(argv: string[]): Promise<{ code: number; out: string; err: string }> {
@@ -52,6 +52,14 @@ test('--help 与 help 子命令输出用法', async () => {
     assert.match(result.out, /--version/);
     assert.match(result.out, /--verbose/);
   }
+});
+
+test('帮助里的退出码按数字升序排列且与实现一致', async () => {
+  const { out } = await capture(['--help']);
+  const section = out.slice(out.indexOf('退出码：'));
+  const codes = [...section.matchAll(/^\s+(\d+)\s/gm)].map((m) => Number(m[1]));
+  assert.deepEqual(codes, [EXIT_OK, EXIT_NO_USABLE_NODE, EXIT_ENVIRONMENT, EXIT_USAGE]);
+  assert.deepEqual(codes, [...codes].sort((a, b) => a - b), '应按数值升序列出');
 });
 
 test('未知命令返回用法错误退出码', async () => {

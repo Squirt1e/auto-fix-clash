@@ -2,7 +2,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { EXIT_ENVIRONMENT, EXIT_OK, EXIT_USAGE } from '../exit-codes.ts';
+import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK, EXIT_USAGE } from '../exit-codes.ts';
 import { ConfigError } from '../config.ts';
 import { UsageError } from '../errors.ts';
 
@@ -16,6 +16,15 @@ function packageVersion(): string {
     return '0.0.0';
   }
 }
+
+const EXIT_CODE_HELP = ([
+  [EXIT_OK, '成功（找到或保持可用节点）'],
+  [EXIT_NO_USABLE_NODE, '未找到可用节点'],
+  [EXIT_ENVIRONMENT, '环境故障（控制端点不可达、内核缺失等）'],
+  [EXIT_USAGE, '用法错误（命令或选项写错、组名未配置等）'],
+] as const)
+  .map(([code, description]) => `  ${String(code).padEnd(2)} ${description}`)
+  .join('\n');
 
 const HELP = `afc — 为 Clash/mihomo 代理组挑选真正可用的节点
 
@@ -50,10 +59,7 @@ const HELP = `afc — 为 Clash/mihomo 代理组挑选真正可用的节点
 说明：本工具只通过 mihomo 控制端点切换代理组的选中节点，不会修改任何 Clash 配置文件。
 
 退出码：
-  0  成功（找到或保持可用节点）
-  ${EXIT_USAGE} 用法错误
-  ${EXIT_ENVIRONMENT} 环境故障（控制端点不可达、内核缺失等）
-  2  未找到可用节点
+${EXIT_CODE_HELP}
 `;
 
 interface CommandContext {
