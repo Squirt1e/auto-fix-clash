@@ -30,8 +30,12 @@ export const SCHEDULE_HELP = `用法：afc schedule <install|uninstall|status> [
   uninstall   移除任务并删除本工具的日志
   status      查看是否在运行、最近一次做了什么
 
+定时任务后端按平台自动选择：macOS 用 launchd、Linux 用 systemd 用户定时器
+（没有 systemd 时退回 cron）、Windows 用任务计划程序。
+
 选项：
   --interval <seconds>   运行间隔，最小 60
+  --backend <name>       强制指定后端：launchd | systemd | cron | schtasks
   --config <path>        指定配置文件（会写入任务，供后台运行时使用）
   --dry-run              只展示将要写入的任务定义
   --verbose              额外打印任务定义路径与系统里显示的名字

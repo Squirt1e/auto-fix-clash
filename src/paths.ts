@@ -1,17 +1,27 @@
 import { execFileSync } from 'node:child_process';
 import { accessSync, constants, existsSync, readdirSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import {
+  clashPartyDataDirs,
+  clashVergeDataDirs,
+  currentPlatform,
+  isWindows,
+  kernelCandidates,
+  kernelExecutableNames,
+  pipeCandidates,
+  socketDirs,
+  type PlatformContext,
+} from './platform.ts';
 
-/** Clash Party 的数据目录。 */
-export function clashPartyDataDir(): string {
-  return join(homedir(), 'Library', 'Application Support', 'mihomo-party');
+/** Clash Party 数据目录（按平台；可传 ctx 便于测试）。 */
+export function clashPartyDataDir(ctx: PlatformContext = currentPlatform()): string {
+  return clashPartyDataDirs(ctx)[0]!;
 }
 
-/** Clash Verge Rev 的数据目录（仅用于发现，本期不写入）。 */
-export function clashVergeDataDir(): string {
-  return join(homedir(), 'Library', 'Application Support', 'io.github.clash-verge-rev.clash-verge-rev');
+/** Clash Verge Rev 数据目录（按平台；仅用于发现，不写入）。 */
+export function clashVergeDataDir(ctx: PlatformContext = currentPlatform()): string {
+  return clashVergeDataDirs(ctx)[0]!;
 }
 
 function isExecutableFile(path: string): boolean {
@@ -23,17 +33,9 @@ function isExecutableFile(path: string): boolean {
   }
 }
 
-/** 已知的内核二进制位置（按优先级）。 */
-export function kernelPathCandidates(): string[] {
-  return [
-    '/Applications/Clash Party.app/Contents/Resources/sidecar/mihomo',
-    join(clashPartyDataDir(), 'sidecar', 'mihomo'),
-    '/Applications/Clash Verge.app/Contents/MacOS/verge-mihomo',
-    '/Applications/ClashX Meta.app/Contents/Resources/mihomo',
-    '/opt/homebrew/bin/mihomo',
-    '/usr/local/bin/mihomo',
-    join(homedir(), '.config', 'mihomo', 'mihomo'),
-  ];
+/** 已知的内核二进制位置（按平台，按优先级）。 */
+export function kernelPathCandidates(ctx: PlatformContext = currentPlatform()): string[] {
+  return kernelCandidates(ctx);
 }
 
 export class KernelNotFoundError extends Error {
@@ -41,7 +43,7 @@ export class KernelNotFoundError extends Error {
     super(
       '找不到 mihomo 内核二进制。\n' +
       '已尝试的位置：\n' + tried.map((p) => `  - ${p}`).join('\n') + '\n' +
-      '请在 afc.config.yaml 中设置 probe.kernelPath 指定内核路径，\n' +
+      '请在 afc 配置里设置 probe.kernelPath 指定内核路径，\n' +
       '或确认 Clash Party / Clash Verge 已安装（本项目不下载、不内置内核）。',
     );
     this.name = 'KernelNotFoundError';
@@ -49,19 +51,25 @@ export class KernelNotFoundError extends Error {
 }
 
 /** 定位 mihomo 内核二进制：显式路径 > 已知位置 > PATH。 */
-export function findKernelBinary(explicit?: string): string {
+export function findKernelBinary(explicit?: string, ctx: PlatformContext = currentPlatform()): string {
   const tried: string[] = [];
   if (explicit) {
     if (isExecutableFile(explicit)) return explicit;
     tried.push(`${explicit}（配置中指定，不可执行）`);
   }
-  for (const candidate of kernelPathCandidates()) {
+  for (const candidate of kernelPathCandidates(ctx)) {
     tried.push(candidate);
     if (isExecutableFile(candidate)) return candidate;
   }
-  for (const name of ['mihomo', 'verge-mihomo', 'clash-meta']) {
+  const lookup = isWindows(ctx) ? { cmd: 'where', args: [] } : { cmd: 'which', args: [] };
+  for (const name of kernelExecutableNames(ctx)) {
     try {
-      const found = execFileSync('which', [name], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      const out = execFileSync(lookup.cmd, [...lookup.args, name], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+      // where 可能返回多行，取第一行
+      const found = out.split(/\r?\n/)[0]?.trim();
       if (found && isExecutableFile(found)) return found;
     } catch {
       tried.push(`PATH 中的 ${name}`);
@@ -80,6 +88,8 @@ export interface KernelProcess {
   unixSocket?: string;
   /** 由 -ext-ctl 指定的 TCP 监听地址。 */
   tcpController?: string;
+  /** 由 -ext-ctl-pipe 指定的命名管道（Windows）。 */
+  pipePath?: string;
 }
 
 /**
@@ -109,25 +119,77 @@ export function parseKernelArgs(command: string): Omit<KernelProcess, 'pid' | 'c
   if (unixSocket) out.unixSocket = unixSocket;
   const tcp = readFlag('-ext-ctl');
   if (tcp) out.tcpController = tcp;
+  const pipe = readFlag('-ext-ctl-pipe');
+  if (pipe) out.pipePath = pipe;
   return out;
 }
 
-/** 列出正在运行的 mihomo 内核进程。 */
-export function listKernelProcesses(): KernelProcess[] {
+/**
+ * 内核进程的命令行里是否出现内核可执行文件名。
+ * 同时兼容 POSIX（`/usr/bin/mihomo`）与 Windows（`C:\...\verge-mihomo.exe`）。
+ */
+const KERNEL_COMMAND_PATTERN = /(^|[\\/])(verge-mihomo|mihomo|clash-meta)(\.exe)?(["']?\s|"|'|$)/i;
+
+/** 列出正在运行的内核进程与它的原始命令行。 */
+function runProcessList(ctx: PlatformContext): { pid: number; command: string }[] {
+  const out: { pid: number; command: string }[] = [];
+  if (isWindows(ctx)) {
+    // Windows 没有 ps：用 PowerShell 取进程命令行
+    let raw: string;
+    try {
+      raw = execFileSync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          'Get-CimInstance Win32_Process | Where-Object { $_.CommandLine } | ' +
+            'Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress',
+        ],
+        { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] },
+      );
+    } catch {
+      return [];
+    }
+    try {
+      const parsed: unknown = JSON.parse(raw.trim() || '[]');
+      const list = Array.isArray(parsed) ? parsed : [parsed];
+      for (const item of list) {
+        if (typeof item !== 'object' || item === null) continue;
+        const rec = item as { ProcessId?: unknown; CommandLine?: unknown };
+        if (typeof rec.ProcessId === 'number' && typeof rec.CommandLine === 'string') {
+          out.push({ pid: rec.ProcessId, command: rec.CommandLine });
+        }
+      }
+    } catch {
+      return [];
+    }
+    return out;
+  }
+
   let psOut: string;
   try {
     psOut = execFileSync('ps', ['-axo', 'pid=,command='], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
   } catch {
     return [];
   }
-  const results: KernelProcess[] = [];
   for (const line of psOut.split('\n')) {
     const match = /^\s*(\d+)\s+(.*)$/.exec(line);
     if (!match) continue;
     const [, pidText, command] = match;
-    if (!command || !/(^|\/)(mihomo|verge-mihomo|clash-meta)(\s|$)/.test(command)) continue;
+    if (!command) continue;
+    out.push({ pid: Number(pidText), command });
+  }
+  return out;
+}
+
+/** 列出正在运行的 mihomo 内核进程（含工作目录与控制端点参数）。 */
+export function listKernelProcesses(ctx: PlatformContext = currentPlatform()): KernelProcess[] {
+  const results: KernelProcess[] = [];
+  for (const { pid, command } of runProcessList(ctx)) {
+    if (!KERNEL_COMMAND_PATTERN.test(command)) continue;
     if (command.includes('afc-probe')) continue;
-    results.push({ pid: Number(pidText), command, ...parseKernelArgs(command) });
+    results.push({ pid, command, ...parseKernelArgs(command) });
   }
   return results;
 }
@@ -137,13 +199,19 @@ export function listKernelProcesses(): KernelProcess[] {
  * Clash Party 正常使用 <dataDir>/work/config.yaml；
  * 进程的 -d 参数是最权威的来源（能覆盖 diffWorkDir 等设置）。
  */
-export function runtimeConfigPathCandidates(explicit?: string): string[] {
+export function runtimeConfigPathCandidates(
+  explicit?: string,
+  ctx: PlatformContext = currentPlatform(),
+): string[] {
   const paths: string[] = [];
   if (explicit) paths.push(explicit);
-  for (const proc of listKernelProcesses()) {
+  for (const proc of listKernelProcesses(ctx)) {
     if (proc.workDir) paths.push(join(proc.workDir, 'config.yaml'));
   }
-  const partyWork = join(clashPartyDataDir(), 'work');
+  // Clash Verge 系列把合并后的运行时配置放在数据目录下的 config.yaml
+  for (const dir of clashVergeDataDirs(ctx)) paths.push(join(dir, 'config.yaml'));
+  for (const dir of clashPartyDataDirs(ctx)) paths.push(join(dir, 'config.yaml'));
+  const partyWork = join(clashPartyDataDir(ctx), 'work');
   paths.push(join(partyWork, 'config.yaml'));
   // diffWorkDir 模式下配置位于 work/<profileId>/config.yaml
   try {

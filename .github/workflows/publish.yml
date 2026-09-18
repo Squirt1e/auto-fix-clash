@@ -1,11 +1,12 @@
-name: Publish to npm
+name: CI & Publish
 
-# 触发：推送 v* 标签（例如 v1.0.1）时自动发布
-# 也可在 Actions 页面手动触发：默认只做校验与打包，不真正发布
+# 注意：文件名 publish.yml 必须保持不变 —— npm 的 Trusted Publisher 绑定的是
+# 「仓库 + workflow 文件名」，改名会直接让 OIDC 发布失效。
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
+  pull_request:
   workflow_dispatch:
     inputs:
       dry_run:
@@ -15,13 +16,41 @@ on:
 
 permissions:
   contents: read
-  id-token: write # OIDC：trusted publishing 与 provenance 必需
 
 jobs:
+  test:
+    name: 测试（${{ matrix.os }}）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm typecheck
+      - run: pnpm test
+
   publish:
-    # 本工具只支持 macOS（launchd 定时任务），因此在 macOS runner 上跑，
-    # 这样 launchd 相关逻辑也真的被测试覆盖；公共仓库 macOS runner 免费
-    runs-on: macos-latest
+    name: 发布到 npm
+    needs: test
+    # 只在打 v* 标签或手动触发时发布；普通提交与 PR 只跑测试
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC：trusted publishing 与 provenance 必需
     steps:
       - uses: actions/checkout@v7
 
@@ -37,9 +66,6 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - run: pnpm typecheck
-      - run: pnpm test
-
       - name: 检查 OIDC 环境可用
         run: |
           if [ -z "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
@@ -48,7 +74,6 @@ jobs:
           fi
           echo "OIDC 可用 ✓"
 
-      # 防止 tag 与 package.json 版本不一致导致发错版本
       - name: 校验 tag 与 package.json 版本一致
         if: startsWith(github.ref, 'refs/tags/')
         run: |
@@ -60,7 +85,7 @@ jobs:
             exit 1
           fi
 
-      # 预发布版本（如 1.0.1-rc.0）自动发到 next 标签，不会影响 latest
+      # 预发布版本（如 1.0.1-rc.0）自动发到 next 标签，不影响 latest
       - name: 决定 dist-tag
         id: dist
         run: |
@@ -77,12 +102,17 @@ jobs:
       - run: npm install -g npm@latest
       - run: npm --version
 
-      # 手动触发且勾了 dry_run 时只打包，不发布
+      # 手动触发且勾了 dry_run 时只做打包预演：
+      # 必须先用一个临时版本号，否则 npm 会因"该版本已存在于 registry"而拒绝
+      # （即使 --dry-run 也会校验），这正是上一轮 CI 失败的原因。
       - name: 打包预演（不发布）
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run
-        run: npm publish --dry-run --provenance --access public
+        run: |
+          npm version prerelease --preid=ci --no-git-tag-version
+          echo "预演版本：$(node -p "require('./package.json').version")"
+          npm publish --dry-run --access public --tag next
 
       # 发布：OIDC 自动认证，无需任何 token；--provenance 生成来源签名
       - name: 发布到 npm
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
         run: npm publish --provenance --access public --tag ${{ steps.dist.outputs.tag }}

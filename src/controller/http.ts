@@ -1,8 +1,9 @@
 import { request as httpRequest } from 'node:http';
 
-/** mihomo 控制端点：Unix 域套接字或 TCP。 */
+/** mihomo 控制端点：Unix 域套接字、Windows 命名管道，或 TCP。 */
 export type ControllerEndpoint =
   | { kind: 'unix'; path: string; secret?: string; source: string }
+  | { kind: 'pipe'; path: string; secret?: string; source: string }
   | { kind: 'tcp'; host: string; port: number; secret?: string; source: string };
 
 export interface RawResponse {
@@ -43,9 +44,10 @@ export function rawRequest(endpoint: ControllerEndpoint, options: RawRequestOpti
     headers['content-length'] = String(Buffer.byteLength(body));
   }
 
-  const target = endpoint.kind === 'unix'
-    ? { socketPath: endpoint.path }
-    : { host: endpoint.host, port: endpoint.port };
+  // Unix 套接字与 Windows 命名管道在 Node 里都通过 socketPath 连接
+  const target = endpoint.kind === 'tcp'
+    ? { host: endpoint.host, port: endpoint.port }
+    : { socketPath: endpoint.path };
 
   return new Promise<RawResponse>((resolve, reject) => {
     const req = httpRequest({ ...target, method, path, headers }, (res) => {
@@ -70,5 +72,6 @@ export function rawRequest(endpoint: ControllerEndpoint, options: RawRequestOpti
 }
 
 export function describeEndpoint(endpoint: ControllerEndpoint): string {
-  return endpoint.kind === 'unix' ? `unix:${endpoint.path}` : `tcp:${endpoint.host}:${endpoint.port}`;
+  if (endpoint.kind === 'tcp') return `tcp:${endpoint.host}:${endpoint.port}`;
+  return `${endpoint.kind}:${endpoint.path}`;
 }

@@ -12,7 +12,7 @@ afc 帮你自动挑节点：**直接请求目标站点、看它的真实响应**
 ## 快速开始
 
 ```bash
-npm i -g auto-fix-clash   # 要求 macOS + Node.js ≥ 20（包地址：https://www.npmjs.com/package/auto-fix-clash）
+npm i -g auto-fix-clash   # 要求 Node.js ≥ 20（macOS / Linux / Windows）
 afc schedule install      # 装完就不用管：每 5 分钟自动检查，节点坏了自己换
 ```
 
@@ -38,6 +38,21 @@ afc schedule uninstall    # 不会改动你的任何 Clash 配置
 - 默认照顾**你在 Clash 里手动钉了某个节点的组**（这类组坏了内核不会替你换，比如你手动钉了 GPT 组）
 - 不会碰指向 `DIRECT`/`REJECT` 的组（如 `Bilibili`、`去广告`），也不会碰委托给"自动选择"的组
 - 想让更多组也被照顾：`afc add <组名>`
+
+定时任务由系统自带的调度器承担，后端按平台自动选择，一般不用管：
+
+| 系统 | 用什么调度 | 想查看任务 |
+|---|---|---|
+| macOS | launchd | 系统设置 → 通用 → 登录项与扩展 |
+| Linux | systemd 用户定时器（没有 systemd 时自动退回 cron） | `systemctl --user list-timers afc-heal.timer` |
+| Windows | 任务计划程序 | 任务计划程序里名为 `auto-fix-clash-heal` 的任务 |
+
+需要强制指定后端（例如容器里没有 systemd）：
+
+```bash
+afc schedule install --backend cron
+afc schedule install --dry-run      # 先看将要写入的任务定义
+```
 
 ## 常用命令
 
@@ -108,15 +123,17 @@ afc -v                    # 版本号
 
 ## 常见问题
 
-**系统提示「App 后台活动」显示为 Node.js Foundation？**
+**系统提示「App 后台活动」显示为 Node.js Foundation？（仅 macOS）**
 正常，那就是本项目的定时任务（它执行的是 `node`，macOS 按代码签名主体归类）。
 查看或关闭：系统设置 → 通用 → 登录项与扩展；`afc schedule status --verbose` 可核对任务文件路径。
 
 **会改我的 Clash 配置吗？**
-不会。afc 只写三个位置：`~/Library/LaunchAgents/` 下的定时任务定义、`~/Library/Logs/afc/` 下的日志、
+不会。afc 只写这几处：系统调度器的任务定义（macOS 的 `~/Library/LaunchAgents/`、
+Linux 的 `~/.config/systemd/user/` 或 crontab、Windows 的任务计划程序数据库）、
+日志目录（macOS `~/Library/Logs/afc`、Linux `~/.local/state/afc`、Windows `%LOCALAPPDATA%\afc\logs`），
 以及你自己用 `afc add` 指定的那份 afc 配置文件。卸载时任务与日志一起删除。
 
 **日志里的运行间隔不均匀（比如 05:33 → 06:15）？**
-正常。电脑睡眠期间不触发，唤醒后会补跑一次。
+正常。电脑睡眠期间不触发，唤醒后会补跑一次（systemd 那边靠 `Persistent=true`，launchd 由系统自己补）。
 
 **退出码**：`0` 成功　`2` 未找到可用节点　`3` 环境故障　`64` 用法错误

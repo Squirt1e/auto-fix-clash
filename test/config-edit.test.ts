@@ -12,6 +12,7 @@ import {
 } from '../src/config-edit.ts';
 import { loadConfig, type TargetConfig } from '../src/config.ts';
 import { parseExpectedStatus, resolveWritePath } from '../src/cli/commands/add.ts';
+import { afcConfigPath, currentPlatform } from '../src/platform.ts';
 
 const TARGET: TargetConfig = {
   name: 'Netflix',
@@ -153,11 +154,16 @@ test('没有现成配置时写到固定的用户级路径，而不是当前目�
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'afc-cwd-')));
   const fakeHome = realpathSync(mkdtempSync(join(tmpdir(), 'afc-home-')));
   const oldHome = process.env['HOME'];
+  const oldAppData = process.env['APPDATA'];
   const oldCwd = process.cwd();
   process.env['HOME'] = fakeHome;
+  // Windows 上没有 HOME，配置位置取决于 APPDATA
+  process.env['APPDATA'] = fakeHome;
   process.chdir(dir);
   try {
-    assert.equal(resolveWritePath(), join(fakeHome, '.config', 'afc', 'config.yaml'));
+    // 期望值用同一条平台规则算出来，避免在 Windows 上写死 POSIX 路径
+    const expected = join(afcConfigPath(currentPlatform()));
+    assert.equal(resolveWritePath(), expected);
     // 当前目录已有配置时应当优先使用它（项目内管理配置的用法）
     writeFileSync(join(dir, 'afc.config.yaml'), 'targets: []\n', 'utf8');
     assert.equal(resolveWritePath(), join(dir, 'afc.config.yaml'));
@@ -166,6 +172,8 @@ test('没有现成配置时写到固定的用户级路径，而不是当前目�
   } finally {
     if (oldHome === undefined) delete process.env['HOME'];
     else process.env['HOME'] = oldHome;
+    if (oldAppData === undefined) delete process.env['APPDATA'];
+    else process.env['APPDATA'] = oldAppData;
     process.chdir(oldCwd);
     rmSync(dir, { recursive: true, force: true });
     rmSync(fakeHome, { recursive: true, force: true });

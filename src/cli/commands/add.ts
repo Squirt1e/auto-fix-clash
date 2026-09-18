@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
-import { homedir } from 'node:os';
+import { isAbsolute, resolve } from 'node:path';
+import { afcConfigPath, currentPlatform } from '../../platform.ts';
 import { addTargetToConfigText, writeConfigText } from '../../config-edit.ts';
 import { findGroupName, loadConfig, resolveConfigPath, type TargetConfig } from '../../config.ts';
 import { isGroup } from '../../controller/client.ts';
@@ -44,7 +44,7 @@ export function resolveWritePath(explicit?: string): string {
   if (explicit) return isAbsolute(explicit) ? explicit : resolve(explicit);
   const existing = resolveConfigPath();
   if (existing) return existing;
-  return join(homedir(), '.config', 'afc', 'config.yaml');
+  return afcConfigPath(currentPlatform());
 }
 
 export async function run(context: CommandContext): Promise<number> {

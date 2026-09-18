@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { MihomoClient, NotMihomoError, UnauthorizedError } from './client.ts';
 import { describeEndpoint, HttpError, type ControllerEndpoint } from './http.ts';
 import { listKernelProcesses, readRuntimeConfig, runtimeConfigPathCandidates } from '../paths.ts';
+import { currentPlatform, pipeCandidates, socketDirs, type PlatformContext } from '../platform.ts';
 
 export interface DiscoveredController {
   endpoint: ControllerEndpoint;
@@ -66,21 +67,26 @@ export function parseEndpointString(value: string, secret?: string): ControllerE
     if (!path) throw new Error(`无效的端点：${value}`);
     return { kind: 'unix', path, source, ...(secret ? { secret } : {}) };
   }
+  // Windows 命名管道：pipe:\.\pipeerge-mihomo（也接受省略前缀的 \\.\pipe\...）
+  if (value.startsWith('pipe:') || value.startsWith('\\\\.\\pipe\\')) {
+    const path = value.startsWith('pipe:') ? value.slice('pipe:'.length) : value;
+    if (!path) throw new Error(`无效的端点：${value}`);
+    return { kind: 'pipe', path, source, ...(secret ? { secret } : {}) };
+  }
   const stripped = value.replace(/^https?:\/\//, '');
   const [host, portText] = stripped.split(':');
   const port = Number(portText);
   if (!host || !Number.isInteger(port) || port <= 0) {
-    throw new Error(`无效的端点：${value}（期望 unix:/path 或 host:port）`);
+    throw new Error(`无效的端点：${value}（期望 unix:/path、pipe:\\\\.\\pipe\\name 或 host:port）`);
   }
   return { kind: 'tcp', host, port, source, ...(secret ? { secret } : {}) };
 }
 
-const SOCKET_DIRS = ['/tmp', '/var/run', '/var/tmp'];
 const SOCKET_NAME_PATTERN = /(mihomo|clash|verge|party)/i;
 
-function discoverSocketFiles(): string[] {
+function discoverSocketFiles(ctx: PlatformContext): string[] {
   const found: string[] = [];
-  for (const dir of SOCKET_DIRS) {
+  for (const dir of socketDirs(ctx)) {
     let entries: Dirent[];
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -109,7 +115,8 @@ function discoverSocketFiles(): string[] {
   return found;
 }
 
-const keyOf = (e: ControllerEndpoint): string => (e.kind === 'unix' ? `unix:${e.path}` : `tcp:${e.host}:${e.port}`);
+const keyOf = (e: ControllerEndpoint): string =>
+  e.kind === 'tcp' ? `tcp:${e.host}:${e.port}` : `${e.kind}:${e.path}`;
 
 /**
  * 按可靠性排序枚举候选端点：
@@ -119,7 +126,10 @@ const keyOf = (e: ControllerEndpoint): string => (e.kind === 'unix' ? `unix:${e.
  *   4. 常见目录下名字像 mihomo/clash 的套接字
  *   5. 默认 TCP 端口
  */
-export function candidateEndpoints(options: DiscoverOptions = {}): ControllerEndpoint[] {
+export function candidateEndpoints(
+  options: DiscoverOptions = {},
+  ctx: PlatformContext = currentPlatform(),
+): ControllerEndpoint[] {
   // 显式指定的端点就是唯一候选：用户既然点名了端点，失败时应该明确报错，
   // 而不是悄悄回退到别的端点（否则排查时会被误导）。
   if (options.explicit) return [parseEndpointString(options.explicit, options.secret)];
@@ -131,8 +141,8 @@ export function candidateEndpoints(options: DiscoverOptions = {}): ControllerEnd
     candidates.push(e);
   };
 
-  const processes = listKernelProcesses();
-  for (const configPath of runtimeConfigPathCandidates(options.runtimeConfigPath)) {
+  const processes = listKernelProcesses(ctx);
+  for (const configPath of runtimeConfigPathCandidates(options.runtimeConfigPath, ctx)) {
     try {
       const summary = readRuntimeConfig(configPath);
       const secret = options.secret ?? summary.secret;
@@ -158,6 +168,12 @@ export function candidateEndpoints(options: DiscoverOptions = {}): ControllerEnd
     if (proc.unixSocket) {
       push({ kind: 'unix', path: proc.unixSocket, source: `内核进程 ${proc.pid} 的 -ext-ctl-unix`, ...(secret ? { secret } : {}) });
     }
+    if (proc.pipePath) {
+      const pipePath = proc.pipePath.startsWith('\\\\.\\pipe\\')
+        ? proc.pipePath
+        : `\\\\.\\pipe\\${proc.pipePath}`;
+      push({ kind: 'pipe', path: pipePath, source: `内核进程 ${proc.pid} 的 -ext-ctl-pipe`, ...(secret ? { secret } : {}) });
+    }
     if (proc.tcpController) {
       const [host, portText] = proc.tcpController.split(':');
       const port = Number(portText);
@@ -168,8 +184,12 @@ export function candidateEndpoints(options: DiscoverOptions = {}): ControllerEnd
     }
   }
 
-  for (const path of discoverSocketFiles()) {
+  for (const path of discoverSocketFiles(ctx)) {
     push({ kind: 'unix', path, source: '套接字目录扫描', ...(options.secret ? { secret: options.secret } : {}) });
+  }
+  // Windows：枚举不到命名管道，只能用已知名字试探
+  for (const path of pipeCandidates(ctx)) {
+    push({ kind: 'pipe', path, source: '常见命名管道', ...(options.secret ? { secret: options.secret } : {}) });
   }
 
   push({ kind: 'tcp', host: '127.0.0.1', port: 9090, source: '默认 TCP 端口', ...(options.secret ? { secret: options.secret } : {}) });
@@ -183,9 +203,12 @@ export function candidateEndpoints(options: DiscoverOptions = {}): ControllerEnd
  * 发现并验证 mihomo 控制端点。
  * 逐个候选请求 /version，取第一个确认是 mihomo 的端点。
  */
-export async function discoverController(options: DiscoverOptions = {}): Promise<DiscoveredController> {
+export async function discoverController(
+  options: DiscoverOptions = {},
+  ctx: PlatformContext = currentPlatform(),
+): Promise<DiscoveredController> {
   const timeoutMs = options.timeoutMs ?? 3000;
-  const candidates = candidateEndpoints(options);
+  const candidates = candidateEndpoints(options, ctx);
   if (candidates.length === 0) throw new ControllerDiscoveryError('no-candidates', []);
 
   const attempts: EndpointAttempt[] = [];

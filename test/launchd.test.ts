@@ -66,7 +66,7 @@ test('非 macOS 平台直接拒绝，不去碰调度器', { skip: process.platfo
   );
 });
 
-test('计划任务与日志路径位于用户目录下', () => {
+test('计划任务与日志路径位于用户目录下', { skip: process.platform !== 'darwin' }, () => {
   assert.match(plistPath(), /Library\/LaunchAgents\/com\.auto-fix-clash\.heal\.plist$/);
   assert.match(logPath(), /Library\/Logs\/afc\/heal\.log$/);
   assert.match(logDir(), /Library\/Logs\/afc$/);

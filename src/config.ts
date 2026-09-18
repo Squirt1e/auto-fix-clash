@@ -1,8 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { UsageError } from './errors.ts';
+import { afcConfigPath, currentPlatform } from './platform.ts';
 
 /** 单个探测端点：以「期望状态码」判定节点对该目标是否可用。 */
 export interface ProbeEndpoint {
@@ -173,7 +173,7 @@ export function resolveConfigPath(explicit?: string): string | undefined {
   }
   const candidates = [
     resolve('afc.config.yaml'),
-    join(homedir(), '.config', 'afc', 'config.yaml'),
+    afcConfigPath(currentPlatform()),
   ];
   return candidates.find((p) => existsSync(p));
 }

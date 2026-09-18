@@ -3,18 +3,18 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../../config.ts';
 import { EXIT_OK, EXIT_USAGE } from '../../exit-codes.ts';
+import { currentPlatform } from '../../platform.ts';
 import {
-  buildPlist,
-  describeProgramIdentity,
-  installSchedule,
-  logDir,
-  logPath,
-  plistPath,
-  scheduleStatus,
-  uninstallSchedule,
-} from '../../schedule/launchd.ts';
-import { optBoolean, optNumber, optString, type CommandContext } from '../context.ts';
+  BACKEND_CHOICES,
+  defaultBackendName,
+  getScheduleBackend,
+  isBackendChoice,
+  scheduleLogDir,
+  type BackendChoice,
+  type ScheduleOptions,
+} from '../../schedule/index.ts';
 import { SCHEDULE_HELP } from '../help.ts';
+import { optBoolean, optNumber, optString, type CommandContext } from '../context.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -38,78 +38,105 @@ function resolveCliEntry(): string {
   return join(HERE, '..', `index${ext}`);
 }
 
+/** 各平台"怎么查看这个任务"的一句话提示。 */
+function inspectHint(platform: string): string {
+  if (platform === 'darwin') {
+    return '  查看或关闭：系统设置 → 通用 → 登录项与扩展（显示名是 node 的签名主体，不是本项目名）\n';
+  }
+  if (platform === 'win32') {
+    return '  查看：任务计划程序里名为 auto-fix-clash-heal 的任务\n';
+  }
+  return '  查看：systemctl --user list-timers afc-heal.timer\n';
+}
+
 export async function run(context: CommandContext): Promise<number> {
   const action = context.positionals[0] ?? 'status';
+  const ctx = currentPlatform();
+
+  const rawChoice = optString(context.values, 'backend') ?? 'auto';
+  if (!isBackendChoice(rawChoice)) {
+    process.stderr.write(
+      `未知的后端：${rawChoice}（可选：${BACKEND_CHOICES.join(' / ')}）\n\n${SCHEDULE_HELP}`,
+    );
+    return EXIT_USAGE;
+  }
+  const choice: BackendChoice = rawChoice;
+  const backend = await getScheduleBackend(choice, ctx);
 
   switch (action) {
     case 'install': {
       const config = loadConfig(optString(context.values, 'config'));
       const interval = optNumber(context.values, 'interval') ?? config.schedule.intervalSeconds;
-      const plistOptions = {
+      const options: ScheduleOptions = {
         nodePath: process.execPath,
         cliPath: resolveCliEntry(),
         intervalSeconds: interval,
         workingDirectory: process.cwd(),
         ...(config.sourcePath ? { configPath: config.sourcePath } : {}),
-        logDir: logDir(),
+        logDir: scheduleLogDir(ctx),
       };
 
       if (optBoolean(context.values, 'dry-run')) {
-        process.stdout.write(`将写入 ${plistPath()}：\n\n${buildPlist(plistOptions)}\n`);
+        process.stdout.write(`将要写入（后端：${backend.name}）：\n\n${backend.preview(options)}\n`);
         return EXIT_OK;
       }
 
-      const result = await installSchedule(plistOptions);
+      const result = await backend.install(options);
       process.stdout.write(
-        `已安装周期性修复任务：每 ${interval} 秒运行一次（${result.message}）\n` +
-        `  任务定义：${result.plistPath}\n` +
+        `已安装周期性修复任务（后端：${result.backend}）：每 ${interval} 秒运行一次` +
+        `${result.replaced ? '，已覆盖同名旧任务' : ''}\n` +
+        (result.definitions.length > 0
+          ? `  任务定义：\n${result.definitions.map((d) => `    - ${d}`).join('\n')}\n`
+          : '') +
         `  运行日志：${result.logPath}\n` +
-        '  处理范围：配置里声明的组 + 你在 Clash 里手动钉了节点的组\n\n' +
-        '提示：系统「App 后台活动」里它会显示为「' + describeProgramIdentity().displayName + '」\n' +
-        '      （执行的是 node，macOS 按代码签名主体归类），不代表装了别的软件。\n' +
-        '      查看/关闭：系统设置 → 通用 → 登录项与扩展\n' +
-        '      卸载：afc schedule uninstall（不修改任何 Clash 配置）\n',
+        `  ${result.message}\n` +
+        inspectHint(ctx.platform) +
+        '  处理范围：配置里声明的组 + 你在 Clash 里手动钉了节点的组\n' +
+        '  卸载：afc schedule uninstall（不修改任何 Clash 配置）\n',
       );
       return EXIT_OK;
     }
 
     case 'uninstall': {
-      const result = await uninstallSchedule(true);
+      const result = await backend.uninstall(true);
       process.stdout.write(
-        `已卸载周期性修复任务。\n  ${result.message}\n` +
+        `已卸载周期性修复任务（后端：${result.backend}）。\n  ${result.message}\n` +
         (result.removed.length > 0
           ? `  已删除：\n${result.removed.map((p) => `    - ${p}`).join('\n')}\n`
-          : '  没有需要删除的文件。\n') +
+          : '  没有需要删除的内容。\n') +
         'Clash 配置与当前代理组选择未做任何改动。\n',
       );
       return EXIT_OK;
     }
 
     case 'status': {
-      const status = await scheduleStatus();
+      const status = await backend.status();
       if (!status.installed) {
-        process.stdout.write('未安装周期性修复任务（afc schedule install 可安装）。\n');
+        process.stdout.write(
+          `未安装周期性修复任务（本机默认后端：${defaultBackendName(ctx)}）。\n` +
+          '  安装：afc schedule install\n',
+        );
         return EXIT_OK;
       }
       process.stdout.write(
-        `周期性修复任务：${status.loaded ? '运行中' : '已安装但未被调度器载入'}` +
+        `周期性修复任务：${status.loaded ? '运行中' : '已安装但未载入'}` +
+        `，后端 ${status.backend}` +
         `${status.intervalSeconds === undefined ? '' : `，每 ${status.intervalSeconds} 秒`}\n` +
         (status.lastLogLine ? `  最近一次：${status.lastLogLine}\n` : '  还没有运行记录。\n'),
       );
       if (!status.loaded) {
-        process.stdout.write('  请重新执行 afc schedule install 以载入调度器。\n');
+        process.stdout.write('  请重新执行 afc schedule install 以载入任务。\n');
       }
       if (optBoolean(context.values, 'verbose')) {
-        const identity = describeProgramIdentity();
         process.stdout.write(
-          `\n  任务定义：${status.plistPath}\n` +
-          `  执行程序：${identity.program}\n` +
-          `  系统里显示为：${identity.displayName}\n` +
+          (status.definitions.length > 0
+            ? `  任务定义：\n${status.definitions.map((d) => `    - ${d}`).join('\n')}\n`
+            : '') +
           `  日志：${status.logPath}\n` +
           `  最近退出码：${status.lastExitStatus ?? '（未记录）'}\n`,
         );
       }
-      process.stdout.write('  卸载：afc schedule uninstall　（--verbose 查看路径与显示名）\n');
+      process.stdout.write('  卸载：afc schedule uninstall　（--verbose 查看定义文件与日志路径）\n');
       return EXIT_OK;
     }
 

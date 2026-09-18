@@ -4,6 +4,14 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { MIN_SCHEDULE_INTERVAL_SECONDS } from '../config.ts';
+import { currentPlatform, type PlatformContext } from '../platform.ts';
+import type {
+  InstallResult,
+  ScheduleBackend,
+  ScheduleOptions,
+  ScheduleStatus,
+  UninstallResult,
+} from './types.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -90,7 +98,7 @@ async function launchctl(args: string[]): Promise<{ ok: boolean; out: string; er
   }
 }
 
-export interface InstallResult {
+export interface LaunchdInstallResult {
   plistPath: string;
   logPath: string;
   loaded: boolean;
@@ -98,7 +106,7 @@ export interface InstallResult {
 }
 
 /** 安装（幂等）：先卸载旧的，再载入新的，随后立即试跑一次。 */
-export async function installSchedule(options: PlistOptions): Promise<InstallResult> {
+export async function installSchedule(options: PlistOptions): Promise<LaunchdInstallResult> {
   if (process.platform !== 'darwin') {
     throw new Error(`计划任务目前只支持 macOS（当前平台：${process.platform}）。`);
   }
@@ -134,14 +142,14 @@ export async function installSchedule(options: PlistOptions): Promise<InstallRes
   };
 }
 
-export interface UninstallResult {
+export interface LaunchdUninstallResult {
   removed: string[];
   bootedOut: boolean;
   message: string;
 }
 
 /** 卸载（幂等）：从调度器移除、删除 plist 与自有日志。 */
-export async function uninstallSchedule(removeLogs = true): Promise<UninstallResult> {
+export async function uninstallSchedule(removeLogs = true): Promise<LaunchdUninstallResult> {
   const uid = process.getuid?.() ?? 0;
   const boot = await launchctl(['bootout', `gui/${uid}/${LAUNCHD_LABEL}`]);
   const removed: string[] = [];
@@ -166,7 +174,7 @@ export async function uninstallSchedule(removeLogs = true): Promise<UninstallRes
   };
 }
 
-export interface ScheduleStatus {
+export interface LaunchdScheduleStatus {
   installed: boolean;
   loaded: boolean;
   intervalSeconds?: number;
@@ -177,10 +185,10 @@ export interface ScheduleStatus {
 }
 
 /** 查询计划任务状态。 */
-export async function scheduleStatus(): Promise<ScheduleStatus> {
+export async function scheduleStatus(): Promise<LaunchdScheduleStatus> {
   const path = plistPath();
   const installed = existsSync(path);
-  const result: ScheduleStatus = { installed, loaded: false, plistPath: path, logPath: logPath() };
+  const result: LaunchdScheduleStatus = { installed, loaded: false, plistPath: path, logPath: logPath() };
 
   if (installed) {
     const text = readFileSyncSafe(path);
@@ -255,3 +263,61 @@ export function describeProgramIdentity(program: string = process.execPath): Pro
   };
 }
 
+/**
+ * launchd 后端（macOS）：把既有实现适配到统一的 ScheduleBackend 接口。
+ */
+export class LaunchdBackend implements ScheduleBackend {
+  readonly name = 'launchd';
+  private readonly platformContext: PlatformContext;
+
+  constructor(platformContext: PlatformContext = currentPlatform()) {
+    this.platformContext = platformContext;
+  }
+
+  private toPlistOptions(options: ScheduleOptions): PlistOptions {
+    return {
+      nodePath: options.nodePath,
+      cliPath: options.cliPath,
+      intervalSeconds: options.intervalSeconds,
+      workingDirectory: options.workingDirectory,
+      ...(options.configPath ? { configPath: options.configPath } : {}),
+      logDir: options.logDir,
+    };
+  }
+
+  preview(options: ScheduleOptions): string {
+    return buildPlist(this.toPlistOptions(options));
+  }
+
+  async install(options: ScheduleOptions): Promise<InstallResult> {
+    const replaced = existsSync(plistPath());
+    const result = await installSchedule(this.toPlistOptions(options));
+    return {
+      backend: this.name,
+      definitions: [result.plistPath],
+      loaded: result.loaded,
+      replaced,
+      message: result.message,
+      logPath: result.logPath,
+    };
+  }
+
+  async uninstall(removeLogs = true): Promise<UninstallResult> {
+    const result = await uninstallSchedule(removeLogs);
+    return { backend: this.name, removed: result.removed, message: result.message };
+  }
+
+  async status(): Promise<ScheduleStatus> {
+    const s = await scheduleStatus();
+    return {
+      backend: this.name,
+      installed: s.installed,
+      loaded: s.loaded,
+      ...(s.intervalSeconds === undefined ? {} : { intervalSeconds: s.intervalSeconds }),
+      ...(s.lastExitStatus === undefined ? {} : { lastExitStatus: s.lastExitStatus }),
+      definitions: existsSync(s.plistPath) ? [s.plistPath] : [],
+      logPath: s.logPath,
+      ...(s.lastLogLine === undefined ? {} : { lastLogLine: s.lastLogLine }),
+    };
+  }
+}

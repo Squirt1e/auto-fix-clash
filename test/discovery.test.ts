@@ -6,7 +6,7 @@ import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MihomoClient } from '../src/controller/client.ts';
-import { ControllerDiscoveryError, discoverController, parseEndpointString } from '../src/controller/discovery.ts';
+import { ControllerDiscoveryError, candidateEndpoints, discoverController, parseEndpointString } from '../src/controller/discovery.ts';
 import { parseKernelArgs } from '../src/paths.ts';
 
 interface FakeController {
@@ -85,7 +85,8 @@ test('发现 TCP 控制端点并识别 mihomo 版本', async () => {
   }
 });
 
-test('发现带 PID 的 Unix 套接字端点（路径随进程变化）', async () => {
+// Windows 上没有 Unix 套接字（用命名管道），这条在 Windows 上跳过
+test('发现带 PID 的 Unix 套接字端点（路径随进程变化）', { skip: process.platform === 'win32' }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'afc-test-'));
   const socketPath = join(dir, 'mihomo-party-502-12345.sock');
   const body = JSON.stringify({ meta: true, version: 'v1.19.27' });
@@ -168,4 +169,25 @@ test('MihomoClient 可以切换组选择', async () => {
   } finally {
     fake.server.close();
   }
+});
+
+test('解析 Windows 命名管道端点', () => {
+  const explicit = parseEndpointString('pipe:\\\\.\\pipe\\verge-mihomo');
+  assert.equal(explicit.kind, 'pipe');
+  assert.equal((explicit as { path: string }).path, '\\\\.\\pipe\\verge-mihomo');
+
+  // 省略前缀也认
+  const bare = parseEndpointString('\\\\.\\pipe\\mihomo');
+  assert.equal(bare.kind, 'pipe');
+});
+
+test('Windows 平台枚举命名管道候选，POSIX 平台枚举套接字目录', () => {
+  const win = { platform: 'win32' as const, home: 'C:\\Users\\x', env: { APPDATA: 'C:\\Users\\x\\AppData\\Roaming' } };
+  const winCandidates = candidateEndpoints({}, win);
+  assert.ok(winCandidates.some((c) => c.kind === 'pipe'), 'Windows 上应有命名管道候选');
+  assert.ok(winCandidates.every((c) => c.kind !== 'unix'), 'Windows 上不应有 Unix 套接字候选');
+
+  const linux = { platform: 'linux' as const, home: '/home/x', env: {} };
+  const linuxCandidates = candidateEndpoints({}, linux);
+  assert.ok(linuxCandidates.every((c) => c.kind !== 'pipe'), 'POSIX 平台不应有命名管道候选');
 });

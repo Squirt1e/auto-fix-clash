@@ -1,6 +1,6 @@
-import { readFileSync, realpathSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { appendFileSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK, EXIT_USAGE } from '../exit-codes.ts';
 import { ConfigError } from '../config.ts';
@@ -46,6 +46,30 @@ function isNotImplemented(err: unknown): boolean {
 }
 
 let pipeGuardInstalled = false;
+let logTeeInstalled = false;
+
+/**
+ * `--log-file <path>`：把本进程的 stdout/stderr 同时追加到文件。
+ *
+ * 为什么需要它：Windows 的任务计划程序不像 launchd/systemd 那样能重定向输出，
+ * 把日志交给 afc 自己写，三个平台的日志行为才一致。
+ */
+function installLogTee(logFile: string): void {
+  if (logTeeInstalled) return;
+  logTeeInstalled = true;
+  mkdirSync(dirname(logFile), { recursive: true });
+  for (const stream of [process.stdout, process.stderr] as const) {
+    const original = stream.write.bind(stream);
+    stream.write = ((chunk: string | Uint8Array, ...rest: unknown[]): boolean => {
+      try {
+        appendFileSync(logFile, typeof chunk === 'string' ? chunk : Buffer.from(chunk));
+      } catch {
+        // 日志写不进去不能影响主流程
+      }
+      return (original as (...args: unknown[]) => boolean)(chunk, ...rest);
+    }) as typeof stream.write;
+  }
+}
 
 /**
  * 输出被下游提前关闭时（例如 `afc groups | head`）不要抛栈：静默结束即可。
@@ -82,6 +106,8 @@ export async function main(argv: string[]): Promise<number> {
         controller: { type: 'string' },
         secret: { type: 'string' },
         interval: { type: 'string' },
+        backend: { type: 'string' },
+        'log-file': { type: 'string' },
         url: { type: 'string' },
         expect: { type: 'string' },
         'country-deny': { type: 'string' },
@@ -98,6 +124,10 @@ export async function main(argv: string[]): Promise<number> {
 
   const { values, positionals } = parsed;
   const command = positionals[0];
+
+  // 计划任务在 Windows 上没有输出重定向，靠它把日志落盘
+  const logFile = typeof values['log-file'] === 'string' ? values['log-file'] : undefined;
+  if (logFile) installLogTee(logFile);
 
   if (values.version) {
     process.stdout.write(`${packageVersion()}\n`);
