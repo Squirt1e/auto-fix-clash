@@ -13,6 +13,15 @@
     "codex"
   ],
   "license": "MIT",
+  "author": "Squirt1e",
+  "homepage": "https://github.com/Squirt1e/auto-fix-clash#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Squirt1e/auto-fix-clash.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Squirt1e/auto-fix-clash/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=20.11"
