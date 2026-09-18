@@ -44,8 +44,26 @@ afc schedule uninstall     # 完全移除
 安装后由 macOS 的 launchd 每隔一段时间拉起一个**一次性短命进程**（无常驻守护）：
 
 - 先只验证该组**当前节点**（1 次探测）；可用就什么都不做 —— 这正是"只在当前节点不可用时才切换"
-- 只有当前节点不可用时，才扫描候选并切到实测可用的节点
+- 只有当前节点不可用时，才扫描候选并切到实测可用的节点（找到即停，不遍历整份订阅）
 - **全程不写任何 Clash 配置**，只通过控制端点改变该组的选中节点
+
+### 关于系统里的「App 后台活动」提示
+
+安装后 macOS 可能弹出一条「App 后台活动」通知，显示的名字是 **Node.js Foundation** 而不是本项目 —— 这是正常的：
+
+- 该任务执行的是 `node`（用来跑本项目），而 macOS 的后台项列表**按被执行程序的代码签名主体归类**
+- 那个 `node` 二进制的签名主体正好是 `Developer ID Application: Node.js Foundation (HX7739G8FX)`
+- 所以它显示为"Node.js Foundation"，**不代表有别的软件被装到了你的机器上**
+
+`afc schedule status` 会直接告诉你"系统里显示为：Node.js Foundation"，并给出任务定义文件的路径，方便你从系统界面里的条目追溯到本工具：
+
+```
+查看或关闭：系统设置 → 通用 → 登录项与扩展
+核对内容：~/Library/LaunchAgents/com.auto-fix-clash.heal.plist
+彻底移除：afc schedule uninstall
+```
+
+另外，`StartInterval` 型任务在**电脑睡眠期间不会触发**，会在唤醒后补跑一次，所以日志里的间隔看起来不均（例如 05:33 → 06:15）是正常的，不是漏跑。
 
 ## 设计要点
 

@@ -3,7 +3,9 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../../config.ts';
 import { EXIT_OK, EXIT_USAGE } from '../../exit-codes.ts';
 import {
+  backgroundItemNotice,
   buildPlist,
+  describeProgramIdentity,
   installSchedule,
   logDir,
   logPath,
@@ -58,7 +60,8 @@ export async function run(context: CommandContext): Promise<number> {
         `  日志：${result.logPath}\n` +
         `  ${result.message}\n\n` +
         '说明：该任务只通过控制端点切换代理组的选中节点，不会修改任何 Clash 配置。\n' +
-        '用 afc schedule uninstall 可完全移除。\n',
+        '用 afc schedule uninstall 可完全移除。\n\n' +
+        backgroundItemNotice() + '\n',
       );
       return EXIT_OK;
     }
@@ -77,12 +80,15 @@ export async function run(context: CommandContext): Promise<number> {
 
     case 'status': {
       const status = await scheduleStatus();
+      const identity = describeProgramIdentity();
       process.stdout.write(
         `周期性修复任务状态\n` +
         `  已安装：${status.installed ? '是' : '否'}\n` +
         `  已载入调度器：${status.loaded ? '是' : '否'}\n` +
         `  间隔：${status.intervalSeconds === undefined ? '—' : `${status.intervalSeconds} 秒`}\n` +
         `  任务定义：${status.plistPath}\n` +
+        `  执行程序：${identity.program}\n` +
+        `  系统里显示为：${identity.displayName}\n` +
         `  日志：${status.logPath}\n` +
         (status.lastExitStatus ? `  最近退出码：${status.lastExitStatus}\n` : '') +
         (status.lastLogLine ? `  最近日志：${status.lastLogLine}\n` : '') +
@@ -90,6 +96,13 @@ export async function run(context: CommandContext): Promise<number> {
           ? '\n注意：任务已安装但未被调度器载入，请重新执行 afc schedule install。\n'
           : ''),
       );
+      if (status.installed) {
+        process.stdout.write(
+          '\n「系统里显示为」那一行就是它在「系统设置 → 通用 → 登录项与扩展」中的名字：\n' +
+          '它以被执行程序的代码签名主体归类，所以不是本项目的名字。\n' +
+          `核对内容可直接打开：${status.plistPath}\n`,
+        );
+      }
       return EXIT_OK;
     }
 

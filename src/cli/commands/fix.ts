@@ -67,7 +67,10 @@ export async function run(context: CommandContext): Promise<number> {
         if (quiet) process.stdout.write(`${timestamp()} ${target.name}: 跳过（组类型不可切换）\n`);
         else process.stderr.write(`\n${target.name}: ${error.message}\n`);
       } else if (quiet) {
+        // 精简模式只把一行摘要写到 stdout（计划任务的日志），
+        // 完整错误写到 stderr，保留事后排查所需的细节。
         process.stdout.write(`${timestamp()} ${target.name}: 执行失败 — ${error.message.split('\n')[0]}\n`);
+        process.stderr.write(`${timestamp()} ${target.name} 执行失败：\n${error.stack ?? error.message}\n`);
       } else {
         process.stderr.write(`\n${target.name}: 执行失败 — ${error.message}\n`);
       }

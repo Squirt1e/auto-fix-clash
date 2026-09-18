@@ -121,11 +121,27 @@ export class ProbeInstance {
   }
 
   static async start(options: ProbeInstanceOptions): Promise<ProbeInstance> {
+    // 刚唤醒、系统负载高或端口刚回收时，内核对就绪可能明显变慢。
+    // 这类失败是暂时的，重试一次比直接放弃整轮修复更合理（实测出现过一次就绪超时）。
+    const maxAttempts = 2;
+    let lastError: Error | undefined;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await ProbeInstance.startOnce(options);
+      } catch (err) {
+        lastError = err as Error;
+        if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+    throw new Error(`${lastError?.message ?? '无法启动探针实例'}（已重试 ${maxAttempts - 1} 次）`);
+  }
+
+  private static async startOnce(options: ProbeInstanceOptions): Promise<ProbeInstance> {
     if (options.proxies.length === 0) throw new Error('运行时配置中没有可用的节点定义，无法启动探针实例');
     if (options.nodeNames.length === 0) throw new Error('没有可切换的节点，无法启动探针实例');
     const kernelPath = findKernelBinary(options.kernelPath);
     const channels = Math.max(1, options.channels ?? 1);
-    const startupTimeoutMs = options.startupTimeoutMs ?? 20000;
+    const startupTimeoutMs = options.startupTimeoutMs ?? 45000;
     const keepTempDir = options.keepTempDir ?? false;
     pruneStaleTempDirs();
 

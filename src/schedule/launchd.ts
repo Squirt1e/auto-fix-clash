@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -194,7 +194,7 @@ export async function scheduleStatus(): Promise<ScheduleStatus> {
     result.loaded = true;
     const interval = /interval = (\d+)/.exec(printed.out);
     if (interval?.[1]) result.intervalSeconds = Number(interval[1]);
-    const exit = /last exit code = (\S+)/.exec(printed.out);
+    const exit = /last exit code = (\d+)/.exec(printed.out);
     if (exit?.[1]) result.lastExitStatus = exit[1];
   }
 
@@ -214,4 +214,58 @@ function readFileSyncSafe(path: string): string {
   } catch {
     return '';
   }
+}
+
+export interface ProgramIdentity {
+  program: string;
+  /** 执行程序的代码签名主体。macOS 的后台项列表用它归类，而不是我们的任务名。 */
+  authority?: string;
+  /** 系统界面里实际显示的短名称（从签名主体还原）。 */
+  displayName: string;
+}
+
+/**
+ * 把签名主体还原成系统界面里显示的短名称。
+ * 签名里是 `Developer ID Application: Node.js Foundation (HX7739G8FX)`，
+ * 但通知与设置界面显示的是 `Node.js Foundation`。
+ */
+export function shortIdentityName(authority: string | undefined, fallback: string): string {
+  if (!authority) return fallback;
+  return authority
+    .replace(/^(Developer ID Application|Developer ID Installer|Apple Development|Mac Developer):\s*/i, '')
+    .replace(/\s*\([A-Z0-9]{10}\)\s*$/, '')
+    .trim() || fallback;
+}
+
+/**
+ * 读取计划任务实际执行的那个程序的身份信息。
+ *
+ * 为什么要读而不是写死：系统「App 后台活动」里显示的名字来自被执行程序的签名主体
+ * （我们执行的是 node，签名主体是 Node.js Foundation），不读就无法给出准确解释。
+ */
+export function describeProgramIdentity(program: string = process.execPath): ProgramIdentity {
+  const result = spawnSync('codesign', ['-dv', '--verbose=2', program], { encoding: 'utf8' });
+  const text = `${result.stderr ?? ''}${result.stdout ?? ''}`;
+  const authority = /Authority=([^\n]+)/.exec(text)?.[1]?.trim();
+  const base = program.split('/').pop() ?? program;
+  return {
+    program,
+    ...(authority ? { authority } : {}),
+    displayName: shortIdentityName(authority, base),
+  };
+}
+
+/** 系统里那个后台项到底是谁 —— 用用户能自行核对的方式说清楚。 */
+export function backgroundItemNotice(program: string = process.execPath): string {
+  const { authority, displayName, program: resolved } = describeProgramIdentity(program);
+  const base = resolved.split('/').pop() ?? resolved;
+  return [
+    '关于系统可能出现的「App 后台活动」提示：',
+    `  本任务执行的是 ${base}（${resolved}）${authority ? `，其代码签名主体是「${authority}」` : ''}。`,
+    `  macOS 的后台项列表按被执行程序的签名主体归类，所以它会显示为「${displayName}」，`,
+    '  而不是本项目的名字 —— 这不代表有别的软件被装到了你的机器上。',
+    '  查看或关闭：系统设置 → 通用 → 登录项与扩展',
+    `  核对内容：${plistPath()}`,
+    '  彻底移除：afc schedule uninstall',
+  ].join('\n');
 }
