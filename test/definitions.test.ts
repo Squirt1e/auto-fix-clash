@@ -7,6 +7,7 @@ import { stringify as stringifyYaml } from 'yaml';
 import { findGroupName, loadConfig, targetGroupNames } from '../src/config.ts';
 import { ConfigError } from '../src/config.ts';
 import { findNodeDefinitions } from '../src/paths.ts';
+import { joinLike } from '../src/platform.ts';
 
 /** 造一个假的客户端数据目录：work/config.yaml（无内联节点）+ profiles/*.yaml（订阅档案） */
 function fakeClientDir(options: { runtimeProxies?: string[]; profiles?: { name: string; nodes: string[] }[] }): string {
@@ -109,6 +110,28 @@ test('运行时配置无内联节点时，从订阅档案里按重合度找到�
     assert.equal(source.kind, 'profile-file');
     assert.match(source.path, /current-subscription\.yaml$/);
     assert.deepEqual(source.nodeNames, ['香港 01', '日本 01', '日本 02']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('候选路径跟随基础路径自身的风格，不被 ctx 平台带偏', () => {
+  // 本机真实存在的路径（内核工作目录、订阅档案）在真机上就是宿主的风格，
+  // 即使 ctx 是另一个平台，也不能把它们拼成 C:\...\profiles 这种混搭。
+  const dir = fakeClientDir({
+    runtimeProxies: undefined,
+    profiles: [{ name: 'current-subscription', nodes: ['日本 01', '日本 02'] }],
+  });
+  try {
+    const runtimeConfigPath = join(dir, 'work', 'config.yaml');
+    const workDir = join(dir, 'work');
+    assert.equal(joinLike(workDir, 'profiles'), `${workDir}/profiles`);
+    const source = findNodeDefinitions(
+      { runtimeConfigPath, neededNodeNames: ['日本 01'] },
+      { platform: 'win32', home: 'C:\\Users\\tester', env: {} },
+    );
+    assert.equal(source.kind, 'profile-file');
+    assert.match(source.path, /current-subscription\.yaml$/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

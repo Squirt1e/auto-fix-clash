@@ -30,6 +30,19 @@ export function currentPlatform(env: NodeJS.ProcessEnv = process.env): PlatformC
   };
 }
 
+/**
+ * 按 base 路径自身的风格拼接子路径。
+ *
+ * 合成目录（XDG、AppData 等）用 joinFor(ctx) 决定风格；而已经存在于本机的路径
+ * （内核 -d 工作目录、订阅档案文件）必须跟随它自己的风格，否则会出现
+ * "C:\Users\...\profiles" 拼在 POSIX 路径上这类混搭，随后 readdir 直接失败。
+ */
+export function joinLike(base: string, ...parts: string[]): string {
+  const looksWindows =
+    /^[a-zA-Z]:[\\/]/.test(base) || base.startsWith('\\\\') || base.includes('\\');
+  return looksWindows ? win32.join(base, ...parts) : posix.join(base, ...parts);
+}
+
 export function isWindows(ctx: PlatformContext): boolean {
   return ctx.platform === 'win32';
 }

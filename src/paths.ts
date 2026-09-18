@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
   joinFor,
+  joinLike,
   clashPartyDataDirs,
   clashVergeDataDirs,
   currentPlatform,
@@ -208,7 +209,7 @@ export function runtimeConfigPathCandidates(
   const paths: string[] = [];
   if (explicit) paths.push(explicit);
   for (const proc of listKernelProcesses(ctx)) {
-    if (proc.workDir) paths.push(j(proc.workDir, 'config.yaml'));
+    if (proc.workDir) paths.push(joinLike(proc.workDir, 'config.yaml'));
   }
   // Clash Verge 系列把合并后的运行时配置放在数据目录下的 config.yaml
   for (const dir of clashVergeDataDirs(ctx)) paths.push(j(dir, 'config.yaml'));
@@ -282,7 +283,6 @@ function scoreNames(names: string[], needed?: readonly string[]): number {
 
 /** 订阅档案可能存放的位置（运行时配置所在目录及其上级的 profiles 子目录等）。 */
 function profileFileCandidates(runtimeConfigPaths: string[], ctx: PlatformContext): string[] {
-  const j = joinFor(ctx);
   const dirs = new Set<string>();
   for (const path of runtimeConfigPaths) {
     const dir = dirname(path);
@@ -294,7 +294,8 @@ function profileFileCandidates(runtimeConfigPaths: string[], ctx: PlatformContex
 
   const files: string[] = [];
   for (const dir of dirs) {
-    for (const sub of [dir, j(dir, 'profiles'), j(dir, 'profile'), j(dir, 'subscriptions')]) {
+    const rel = (child: string) => joinLike(dir, child);
+    for (const sub of [dir, rel('profiles'), rel('profile'), rel('subscriptions')]) {
       let entries;
       try {
         entries = readdirSync(sub, { withFileTypes: true });
@@ -304,7 +305,7 @@ function profileFileCandidates(runtimeConfigPaths: string[], ctx: PlatformContex
       for (const entry of entries) {
         if (!entry.isFile()) continue;
         if (!/\.(ya?ml)$/i.test(entry.name)) continue;
-        files.push(j(sub, entry.name));
+        files.push(joinLike(sub, entry.name));
       }
     }
   }
