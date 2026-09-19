@@ -238,11 +238,12 @@ jobs:
             const fs = require('fs');
             let body = {};
             try { body = JSON.parse(fs.readFileSync('/tmp/exchange.json', 'utf8')); } catch {}
-            if (body.token) { console.log('换票成功（令牌不回显）'); }
+            if (body.token) { console.log('换票拿到令牌（不回显）'); }
             else { console.log('原因:', body.message || body.error || JSON.stringify(body).slice(0, 400)); }
           "
           rm -f /tmp/exchange.json
-          test "$code" = "200" || exit 1
+          # 换票成功返回的是 201 Created（不是 200），按 2xx 判定
+          case "$code" in 2*) echo "换票通过 ✓" ;; *) exit 1 ;; esac
 
       - name: 打包预演（不发布）
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run
