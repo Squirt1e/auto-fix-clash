@@ -2,6 +2,10 @@ name: CI & Publish
 
 # 注意：文件名 publish.yml 必须保持不变 —— npm 的 Trusted Publisher 绑定的是
 # 「仓库 + workflow 文件名」，改名会直接让 OIDC 发布失效。
+#
+# 结构：test（macOS/Linux/Windows 三系统跑测试）→ pack（只在 ubuntu 打包，
+# 并把产物装进临时前缀真跑一遍）→ publish（只在 ubuntu 上传这个已验证的产物）。
+# 发布用的 tarball 就是 pack 产物，不会再重新构建，避免"发出去的和验过的不是一个东西"。
 on:
   push:
     branches: [main]
@@ -61,15 +65,10 @@ jobs:
             exit "$code"
           fi
 
-  publish:
-    name: 发布到 npm
+  pack:
+    name: 打包（ubuntu）
     needs: test
-    # 只在打 v* 标签或手动触发时发布；普通提交与 PR 只跑测试
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write # OIDC：trusted publishing 与 provenance 必需
     steps:
       - uses: actions/checkout@v7
 
@@ -80,10 +79,68 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+
+      # 打包预演时必须换一个临时版本号，否则 npm 会因"该版本已存在于 registry"
+      # 而拒绝（即使是 --dry-run 也会校验），这正是上一轮 CI 失败的原因。
+      - name: 预演版本号（仅手动触发且勾选 dry_run）
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        run: |
+          npm version prerelease --preid=ci --no-git-tag-version
+          echo "预演版本：$(node -p "require('./package.json').version")"
+
+      - name: 构建并打包
+        run: |
+          pnpm build
+          mkdir -p npm-artifact
+          npm pack --pack-destination npm-artifact
+          ls -l npm-artifact
+
+      # 产物必须能独立装、独立跑：这一步能挡住 files 漏项、bin 路径写错、
+      # 缺 dist、缺 shebang 之类"发出去才发现"的问题。
+      - name: 校验产物可安装可运行
+        run: |
+          set -euo pipefail
+          # 必须给绝对路径：`npm install -g npm-artifact/x.tgz` 会被 npm 当成
+          # GitHub 简写 user/repo 去连 git 仓库（报 code 128），装的是空气。
+          TARBALL="$PWD/$(ls npm-artifact/*.tgz | head -1)"
+          echo "tarball=$TARBALL"
+          PREFIX="$(mktemp -d)"
+          npm install -g "$TARBALL" --prefix "$PREFIX" --no-audit --no-fund
+          VERSION="$("$PREFIX/bin/afc" --version)"
+          echo "装好后 afc --version → $VERSION"
+          "$PREFIX/bin/afc" --help > /dev/null
+          "$PREFIX/bin/afc" groups --help > /dev/null
+          test -f "$PREFIX/lib/node_modules/auto-fix-clash/afc.config.yaml"
+          echo "产物校验通过 ✓"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: npm-tarball
+          path: npm-artifact/*.tgz
+          if-no-files-found: error
+
+  publish:
+    name: 发布到 npm
+    needs: [test, pack]
+    # 只在打 v* 标签或手动触发时发布；普通提交与 PR 只跑测试与打包
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC：trusted publishing 与 provenance 必需
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: npm-tarball
+          path: npm-artifact
 
       - name: 检查 OIDC 环境可用
         run: |
@@ -93,22 +150,34 @@ jobs:
           fi
           echo "OIDC 可用 ✓"
 
-      - name: 校验 tag 与 package.json 版本一致
+      # 版本以 tarball 里的 package.json 为准：发布的就是 pack 阶段验过的那个产物
+      - name: 读取产物版本
+        id: pkg
+        run: |
+          # 绝对路径：npm 会把相对路径的 .tgz 误判成 GitHub 简写 user/repo
+          TARBALL="$(pwd)/$(ls npm-artifact/*.tgz | head -1)"
+          V="$(tar -xOf "$TARBALL" package/package.json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version")"
+          echo "tarball=$TARBALL"
+          echo "version=$V"
+          echo "file=$TARBALL" >> "$GITHUB_OUTPUT"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: 校验 tag 与产物版本一致
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          PKG="$(node -p "require('./package.json').version")"
-          echo "tag=$TAG  package.json=$PKG"
+          PKG="${{ steps.pkg.outputs.version }}"
+          echo "tag=$TAG  产物=$PKG"
           if [ "$TAG" != "$PKG" ]; then
-            echo "::error::tag（$TAG）与 package.json（$PKG）不一致，已中止"
+            echo "::error::tag（$TAG）与产物版本（$PKG）不一致，已中止"
             exit 1
           fi
 
-      # 预发布版本（如 1.0.1-rc.0）自动发到 next 标签，不影响 latest
+      # 预发布版本（如 1.1.0-rc.0）自动发到 next 标签，不影响 latest
       - name: 决定 dist-tag
         id: dist
         run: |
-          V="$(node -p "require('./package.json').version")"
+          V="${{ steps.pkg.outputs.version }}"
           if [[ "$V" == *-* ]]; then
             echo "tag=next" >> "$GITHUB_OUTPUT"
             echo "检测到预发布版本 $V → 发布到 next 标签（latest 不受影响）"
@@ -121,17 +190,11 @@ jobs:
       - run: npm install -g npm@latest
       - run: npm --version
 
-      # 手动触发且勾了 dry_run 时只做打包预演：
-      # 必须先用一个临时版本号，否则 npm 会因"该版本已存在于 registry"而拒绝
-      # （即使 --dry-run 也会校验），这正是上一轮 CI 失败的原因。
       - name: 打包预演（不发布）
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run
-        run: |
-          npm version prerelease --preid=ci --no-git-tag-version
-          echo "预演版本：$(node -p "require('./package.json').version")"
-          npm publish --dry-run --access public --tag next
+        run: npm publish "${{ steps.pkg.outputs.file }}" --dry-run --access public --tag next
 
       # 发布：OIDC 自动认证，无需任何 token；--provenance 生成来源签名
       - name: 发布到 npm
         if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
-        run: npm publish --provenance --access public --tag ${{ steps.dist.outputs.tag }}
+        run: npm publish "${{ steps.pkg.outputs.file }}" --provenance --access public --tag ${{ steps.dist.outputs.tag }}
