@@ -253,3 +253,22 @@ jobs:
       - name: 发布到 npm
         if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
         run: npm publish "${{ steps.pkg.outputs.file }}" --provenance --access public --tag ${{ steps.dist.outputs.tag }} --loglevel=verbose
+
+      # npm publish 打印 `+ 包@版本` 并不代表版本真的上线了：如果这条信任发布者
+      # 只被授予 stage publish 权限，注册表会把这次发布暂存起来等人审批，
+      # 命令却仍然"成功"。这里回查注册表，避免出现「CI 全绿但线上没变」的假成功。
+      - name: 确认版本真的出现在注册表
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
+        run: |
+          set -euo pipefail
+          V="${{ steps.pkg.outputs.version }}"
+          for _ in $(seq 1 12); do
+            if curl -sS https://registry.npmjs.org/auto-fix-clash \
+              | node -e "const d=JSON.parse(require('fs').readFileSync(0,'utf8')); process.exit(Object.keys(d.versions).includes(process.argv[1]) ? 0 : 1)" "$V"; then
+              echo "$V 已在注册表 ✓"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::$V 没有出现在注册表。最可能的原因：这条 Trusted Publisher 只被授予了 stage publish 权限，发布被暂存、等待人工审批。用 npm stage list auto-fix-clash 查看，npm stage approve <stage-id> 批准后即可上线；希望以后免审批就把权限改成含 npm publish。"
+          exit 1
