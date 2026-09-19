@@ -222,6 +222,14 @@ jobs:
           id_token="$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm:registry.npmjs.org" \
             | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).value")"
+          # 令牌里的声明不是密钥（令牌本身不回显），把它们打出来：
+          # npm 侧那条信任关系必须与这些值逐字匹配。
+          ID_TOKEN="$id_token" node -e '
+            const [, payload] = process.env.ID_TOKEN.split(".");
+            const c = JSON.parse(Buffer.from(payload, "base64").toString("utf8"));
+            const keys = ["repository", "repository_owner", "workflow_ref", "job_workflow_ref", "environment", "ref", "event_name"];
+            for (const k of keys) console.log("claim " + k + " = " + (c[k] === undefined ? "(无)" : c[k]));
+          '
           code="$(curl -sS -o /tmp/exchange.json -w '%{http_code}' -X POST \
             -H "Authorization: Bearer $id_token" \
             "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/auto-fix-clash" || true)"
