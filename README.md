@@ -1,5 +1,8 @@
 # afc — 让 Clash 代理组自动选中「真正能用」的节点
 
+> Clash / mihomo（Clash Meta）代理组自动测速与自愈工具：直连 ChatGPT、Codex 等目标站点判定节点真实可用性，当前节点挂了自动切换，
+> 一条命令装好定时巡检。支持 macOS / Linux / Windows，兼容 Clash Party、Clash Verge（Rev）、ClashX Meta 与任意 mihomo 内核。
+
 ## 你是否也遇到过这些情况？
 
 - 打开 Codex 或 ChatGPT 突然用不了，只能去 Clash 里一个个节点试，试到能连为止
@@ -136,6 +139,10 @@ afc groups --controller 127.0.0.1:9090 --secret <密钥>            # 开了 ext
 
 ## 常见问题
 
+**Clash 里的 GPT 分组老是断开，能不能自动换节点？**
+这正是 afc 做的事：每 5 分钟验证一次当前节点，连不上才去扫候选、换成实测能用的那个（能连就绝不动你的选择）。
+只在你手动钉了节点的组、或配置里声明过的组上生效，`DIRECT`/`REJECT` 与委托给「自动选择」的组一律不碰。
+
 **系统提示「App 后台活动」显示为 Node.js Foundation？（仅 macOS）**
 正常，那就是本项目的定时任务（它执行的是 `node`，macOS 按代码签名主体归类）。
 查看或关闭：系统设置 → 通用 → 登录项与扩展；`afc schedule status --verbose` 可核对任务文件路径。
@@ -151,3 +158,25 @@ Linux 的 `~/.config/systemd/user/` 或 crontab、Windows 的任务计划程序�
 Windows 上错过的那一次不补，但下一个周期照常（间隔 5 分钟，最多晚几分钟）。
 
 **退出码**：`0` 成功　`2` 未找到可用节点　`3` 环境故障　`64` 用法错误
+
+---
+
+## English
+
+**afc** (auto-fix-clash) keeps a Clash / mihomo proxy group pinned to a node that actually works.
+
+It does not trust latency or node names. It sends a real request to the target site
+(for example `chatgpt.com/backend-api/codex/responses`) and reads the response: `405` means the
+node is usable, `403` means its exit is country-blocked. When the currently selected node fails,
+afc probes the group's candidates and switches to the first one that really works; while the
+current node is healthy it changes nothing.
+
+- Cross-platform: macOS (launchd), Linux (systemd user timer, cron fallback), Windows (Task Scheduler)
+- Works with Clash Party, Clash Verge / Verge Rev, ClashX Meta or any mihomo kernel —
+  Unix socket, Windows named pipe (`\\.\pipe\verge-mihomo`) or external-controller with a secret
+- Never rewrites your Clash config: it only switches the selected node through the control API
+- Install: `npm i -g auto-fix-clash && afc schedule install` (Node.js ≥ 20)
+
+Keywords: clash, mihomo, clash-meta, clash-verge, clash-party, proxy group auto switch,
+node health check, self-healing proxy, latency vs real reachability, ChatGPT / Codex connectivity,
+launchd, systemd, Windows Task Scheduler, cross-platform CLI.
