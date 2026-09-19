@@ -15,6 +15,7 @@ export const TOP_HELP = `afc — 让 Clash 代理组自动选中「真正能用�
   --json           机器可读输出         --verbose   打印诊断信息与判定依据
   --config <path>  指定配置文件         --quiet     每次运行只留一行
   -v, --version    显示版本             -h, --help  显示本帮助
+  --controller <端点>  --secret <密钥>  手动指定内核控制端点（认不到时用）
 
 处理范围：配置里声明的组 + 你在 Clash 里手动钉了节点的组。
           指向 DIRECT/REJECT 的组、委托给「自动选择」的组不会被改。
@@ -79,6 +80,11 @@ const GROUPS_HELP = `用法：afc groups [选项]
 选项：
   --json      机器可读输出
   --verbose   额外打印控制器来源与配置路径，并逐组说明未处理的原因
+
+认不到控制器时，用 --controller 手动指定：
+  --controller unix:/tmp/mihomo-party-<uid>-<pid>.sock      （Linux / macOS 套接字）
+  --controller 'pipe:\\\\.\\pipe\\verge-mihomo'                 （Windows 命名管道）
+  --controller 127.0.0.1:9090 --secret <密钥>               （外部控制端口）
 `;
 
 const DOCTOR_HELP = `用法：afc doctor [选项]

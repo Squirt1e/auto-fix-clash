@@ -54,6 +54,12 @@ afc schedule install --backend cron
 afc schedule install --dry-run      # 先看将要写入的任务定义
 ```
 
+后端名字：`launchd`、`systemd`、`cron`、`schtasks`。两处平台差异值得知道：
+
+- **Linux**：任务跟着你的登录会话跑。没登录也要跑，执行一次 `loginctl enable-linger $USER`。
+- **Windows**：任务以当前用户身份运行，不需要管理员权限。任务计划程序不记录程序输出，
+  所以 afc 自己把日志写到 `%LOCALAPPDATA%\afc\logs` —— `afc schedule status` 能看到最近一次的结果。
+
 ## 常用命令
 
 | 命令 | 作用 |
@@ -117,7 +123,14 @@ afc -v                    # 版本号
 ## 不是 Clash Party / 有多个订阅
 
 - **其他客户端**（Clash Verge 等）：afc 会自动去找内核的控制端点和运行时配置，通常直接就能用。
-  认不到时先跑 `afc groups --verbose` 看它找到了什么，再用 `--controller` / `--secret` 手动指定。
+  认不到时先跑 `afc groups --verbose` 看它找到了什么，再用 `--controller` / `--secret` 手动指定：
+
+```bash
+afc groups --controller unix:/tmp/mihomo-party-<uid>-<pid>.sock   # Linux / macOS 的套接字
+afc groups --controller 'pipe:\\.\pipe\verge-mihomo'              # Windows 的命名管道
+afc groups --controller 127.0.0.1:9090 --secret <密钥>            # 开了 external-controller 时
+```
+
 - **多个订阅**：afc 跟着**当前生效的订阅**走 —— 切订阅是客户端的事，不用在 afc 里切。
   两个订阅的组名不一样也能自动认（例如一个叫 `GPT`、另一个叫 `🤖AI网站`）。
 
@@ -134,6 +147,7 @@ Linux 的 `~/.config/systemd/user/` 或 crontab、Windows 的任务计划程序�
 以及你自己用 `afc add` 指定的那份 afc 配置文件。卸载时任务与日志一起删除。
 
 **日志里的运行间隔不均匀（比如 05:33 → 06:15）？**
-正常。电脑睡眠期间不触发，唤醒后会补跑一次（systemd 那边靠 `Persistent=true`，launchd 由系统自己补）。
+正常。电脑睡眠期间不触发：systemd 那边靠 `Persistent=true`、launchd 由系统自己补跑，
+Windows 上错过的那一次不补，但下一个周期照常（间隔 5 分钟，最多晚几分钟）。
 
 **退出码**：`0` 成功　`2` 未找到可用节点　`3` 环境故障　`64` 用法错误

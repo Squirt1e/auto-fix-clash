@@ -80,6 +80,18 @@ test('afc <命令> --help 打印该命令的用法', async () => {
   }
 });
 
+test('groups --help 给出 --controller 的三种端点写法', async () => {
+  const { out } = await capture(['groups', '--help']);
+  assert.match(out, /--controller unix:\/tmp\/mihomo-party-<uid>-<pid>\.sock/);
+  assert.match(out, /--controller 127\.0\.0\.1:9090 --secret/);
+  // Windows 管道示例在模板字符串里，反斜杠极容易被吃掉（\v 会变成控制字符），
+  // 这里用 String.raw 断言运行时的真实字面量，锁住它不被改坏。
+  assert.ok(
+    out.includes(String.raw`--controller 'pipe:\\.\pipe\verge-mihomo'`),
+    '管道示例应带正确的反斜杠',
+  );
+});
+
 test('帮助里的退出码按数字升序排列且与实现一致', async () => {
   const { out } = await capture(['--help']);
   const line = out.split('\n').find((l) => l.startsWith('退出码：'));

@@ -67,7 +67,7 @@ export function parseEndpointString(value: string, secret?: string): ControllerE
     if (!path) throw new Error(`无效的端点：${value}`);
     return { kind: 'unix', path, source, ...(secret ? { secret } : {}) };
   }
-  // Windows 命名管道：pipe:\.\pipeerge-mihomo（也接受省略前缀的 \\.\pipe\...）
+  // Windows 命名管道：pipe:\\.\pipe\verge-mihomo（也接受省略前缀的 \\.\pipe\...）
   if (value.startsWith('pipe:') || value.startsWith('\\\\.\\pipe\\')) {
     const path = value.startsWith('pipe:') ? value.slice('pipe:'.length) : value;
     if (!path) throw new Error(`无效的端点：${value}`);
