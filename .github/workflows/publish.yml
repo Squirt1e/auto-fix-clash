@@ -213,6 +213,29 @@ jobs:
       - run: npm install -g npm@latest
       - run: npm --version
 
+      # npm 的 OIDC 换票失败时会静默降级（源码里 "intended to never throw"），
+      # 默认日志级别下只能看到一个没头没尾的 ENEEDAUTH。这里直接调换票接口，
+      # 把注册表的原始拒绝原因打出来。令牌本身绝不回显。
+      - name: 诊断 OIDC 换票
+        run: |
+          set -euo pipefail
+          id_token="$(curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm:registry.npmjs.org" \
+            | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).value")"
+          code="$(curl -sS -o /tmp/exchange.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $id_token" \
+            "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/auto-fix-clash" || true)"
+          echo "换票 HTTP $code"
+          node -e "
+            const fs = require('fs');
+            let body = {};
+            try { body = JSON.parse(fs.readFileSync('/tmp/exchange.json', 'utf8')); } catch {}
+            if (body.token) { console.log('换票成功（令牌不回显）'); }
+            else { console.log('原因:', body.message || body.error || JSON.stringify(body).slice(0, 400)); }
+          "
+          rm -f /tmp/exchange.json
+          test "$code" = "200" || exit 1
+
       - name: 打包预演（不发布）
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run
         run: npm publish "${{ steps.pkg.outputs.file }}" --dry-run --access public --tag next
@@ -220,4 +243,4 @@ jobs:
       # 发布：OIDC 自动认证，无需任何 token；--provenance 生成来源签名
       - name: 发布到 npm
         if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
-        run: npm publish "${{ steps.pkg.outputs.file }}" --provenance --access public --tag ${{ steps.dist.outputs.tag }}
+        run: npm publish "${{ steps.pkg.outputs.file }}" --provenance --access public --tag ${{ steps.dist.outputs.tag }} --loglevel=verbose
