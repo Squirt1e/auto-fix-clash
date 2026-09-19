@@ -132,15 +132,38 @@ jobs:
       contents: read
       id-token: write # OIDC：trusted publishing 与 provenance 必需
     steps:
+      # 注意：这里刻意不写 registry-url。一旦写了，setup-node 会生成
+      #   //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}
+      # 于是 npm 走（空的）token 认证，OIDC 可信发布根本不接管，
+      # 最终表现为 PUT 注册表 404。默认 registry 本来就是 registry.npmjs.org，
+      # 不需要额外配置。
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
 
       - uses: actions/download-artifact@v8
         with:
           name: npm-tarball
           path: npm-artifact
+
+      # 堵住上面那个坑的复发。注意 _authToken 是 npm 的受保护键：
+      # `npm config get` 会直接报错或返回空，唯一可靠信号是 `npm config list`
+      # 里那行 `= (protected)`。
+      - name: 确认没有 token 干扰 OIDC
+        run: |
+          set -euo pipefail
+          echo "--- npm 配置里的认证项（如有）"
+          npm config list 2>/dev/null | grep -iE '_authToken|NODE_AUTH_TOKEN' || echo "(无)"
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::环境里设置了 NODE_AUTH_TOKEN，会让 npm 走 token 认证而不是 OIDC"
+            exit 1
+          fi
+          if npm config list 2>/dev/null | grep -qiE '_authToken'; then
+            echo "::error::npm 配置里存在 _authToken，会让 npm 走 token 认证而不是 OIDC（表现为 404）"
+            exit 1
+          fi
+          echo "registry=$(npm config get registry)"
+          echo "无 token 干扰，OIDC 会接管 ✓"
 
       - name: 检查 OIDC 环境可用
         run: |
