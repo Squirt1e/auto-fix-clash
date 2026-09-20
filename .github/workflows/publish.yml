@@ -257,14 +257,17 @@ jobs:
       # npm publish 打印 `+ 包@版本` 并不代表版本真的上线了：如果这条信任发布者
       # 只被授予 stage publish 权限，注册表会把这次发布暂存起来等人审批，
       # 命令却仍然"成功"。这里回查注册表，避免出现「CI 全绿但线上没变」的假成功。
+      #
+      # 查「这一版的 manifest」而不是整包 packument：整包文档有 CDN 缓存，1.1.1 那次
+      # 发布其实成功了却被缓存判成失败（假失败一样误导人）；单版 manifest 在发布被
+      # 接受后立刻可取，而暂存中的版本取不到，所以用它判断既快又不丢原本的守卫作用。
       - name: 确认版本真的出现在注册表
         if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
         run: |
           set -euo pipefail
           V="${{ steps.pkg.outputs.version }}"
           for _ in $(seq 1 12); do
-            if curl -sS https://registry.npmjs.org/auto-fix-clash \
-              | node -e "const d=JSON.parse(require('fs').readFileSync(0,'utf8')); process.exit(Object.keys(d.versions).includes(process.argv[1]) ? 0 : 1)" "$V"; then
+            if curl -sSf "https://registry.npmjs.org/auto-fix-clash/$V" > /dev/null; then
               echo "$V 已在注册表 ✓"
               exit 0
             fi
