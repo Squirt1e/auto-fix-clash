@@ -6,6 +6,7 @@ import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK, EXIT_USAGE } from '../e
 import { ConfigError } from '../config.ts';
 import { COMMAND_HELP, TOP_HELP } from './help.ts';
 import { UsageError } from '../errors.ts';
+import { setVerbose } from '../verbosity.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -124,6 +125,9 @@ export async function main(argv: string[]): Promise<number> {
 
   const { values, positionals } = parsed;
   const command = positionals[0];
+
+  // 报错文案的详略由它决定：默认只给下一步，--verbose 才铺开候选清单与平台细节
+  setVerbose(values.verbose === true);
 
   // 计划任务在 Windows 上没有输出重定向，靠它把日志落盘
   const logFile = typeof values['log-file'] === 'string' ? values['log-file'] : undefined;

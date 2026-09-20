@@ -24,7 +24,7 @@ import {
   type PlatformContext,
 } from '../platform.ts';
 import { scanWindowsPipes } from './pipe-scan.ts';
-import { wslBridge, wslClientConfigPaths, type WslBridge } from '../wsl.ts';
+import { isVerbose } from '../verbosity.ts';
 
 export interface DiscoveredController {
   endpoint: ControllerEndpoint;
@@ -198,10 +198,6 @@ function collectConfigCandidates(
   options: DiscoverOptions,
   facts: DiscoveryFacts,
   push: (e: ControllerEndpoint | undefined) => void,
-  /** WSL 用：把配置里的 127.0.0.1 再按宿主机地址生成一份候选。 */
-  hostRewrites: readonly string[] = [],
-  /** WSL 用：Windows 配置里的 unix/pipe 端点在这里毫无意义，不要生成。 */
-  skipLocalIpc = false,
 ): void {
   try {
     const summary = readRuntimeConfig(configPath);
@@ -217,17 +213,14 @@ function collectConfigCandidates(
     // 因此把它当其它候选的兜底凭据（凭据不对时服务端一样是 401，不会有副作用）。
     if (!facts.configSecret && summary.secret) facts.configSecret = summary.secret;
 
-    if (!skipLocalIpc && summary.externalControllerUnix) {
+    if (summary.externalControllerUnix) {
       push({ kind: 'unix', path: summary.externalControllerUnix, source: `运行时配置 ${configPath}`, ...(secret ? { secret } : {}) });
     }
-    if (!skipLocalIpc && summary.externalControllerPipe) {
+    if (summary.externalControllerPipe) {
       push({ kind: 'pipe', path: summary.externalControllerPipe, source: `运行时配置 ${configPath}`, ...(secret ? { secret } : {}) });
     }
     if (summary.externalController) {
       push(tcpFromPair(summary.externalController, `运行时配置 ${configPath}`, secret));
-      for (const host of hostRewrites) {
-        push(tcpFromPair(replaceHost(summary.externalController, host), `运行时配置 ${configPath}（WSL 宿主机 ${host}）`, secret));
-      }
     }
   } catch {
     // 配置读取失败不影响其它候选
@@ -254,7 +247,6 @@ export function cheapPlan(
   for (const configPath of configPaths) {
     collectConfigCandidates(configPath, options, facts, push);
   }
-  if (detectWsl()) collectWslCandidates(options, facts, push);
   for (const port of configuredPorts(options)) {
     push({
       kind: 'tcp',
@@ -300,10 +292,6 @@ export interface DiscoveryFacts {
   checkedConfigPaths: string[];
   /** 本次发现是否按 Windows 走（决定报告里要不要讲管道枚举）。 */
   windows: boolean;
-  /** WSL：读到的 Windows 用户目录、宿主机地址与客户端配置。 */
-  wslProfiles: string[];
-  wslHostAddresses: string[];
-  wslConfigPaths: string[];
   defaults: readonly number[];
   /** 从运行时配置里读到的 secret（用于给其它候选兜底，以及认证失败后的重试）。 */
   configSecret?: string;
@@ -442,9 +430,6 @@ function emptyFacts(): DiscoveryFacts {
     vergePipes: [],
     checkedConfigPaths: [],
     windows: false,
-    wslProfiles: [],
-    wslHostAddresses: [],
-    wslConfigPaths: [],
     defaults: DEFAULT_CONTROLLER_PORTS,
   };
 }
@@ -454,41 +439,6 @@ function replaceHost(value: string, host: string): string {
   const hostPort = value.replace(/^https?:\/\//, '');
   const port = hostPort.slice(hostPort.lastIndexOf(':') + 1);
   return `${host}:${port}`;
-}
-
-/**
- * WSL 专属候选：从 Windows 宿主机那份配置里读出控制端点，再把主机名换成能通的地址。
- *
- * 为什么需要：WSL2 的 127.0.0.1 是它自己的回环，而宿主机的控制端口默认只绑 127.0.0.1，
- * 所以「读得到配置」不等于「连得上」；镜像网络模式（networkingMode=mirrored）下
- * 127.0.0.1 才是通的，NAT 模式则要宿主机地址 + 客户端允许局域网。两种都试。
- */
-export function collectWslCandidates(
-  options: DiscoverOptions,
-  facts: DiscoveryFacts,
-  push: (e: ControllerEndpoint | undefined) => void,
-  bridge: WslBridge = wslBridge(),
-  configPaths: readonly string[] = wslClientConfigPaths(bridge),
-): void {
-  facts.wslHostAddresses = [...bridge.hostAddresses];
-  facts.wslProfiles = bridge.profiles.map((p) => `${p.mountRoot}/Users/${p.username}`);
-  for (const configPath of configPaths) {
-    facts.wslConfigPaths.push(configPath);
-    collectConfigCandidates(configPath, options, facts, push, bridge.hostAddresses, true);
-  }
-  // 宿主机上的默认端口也试一遍（配置读不到时还有这条路）
-  const secret = options.secret ?? facts.configSecret;
-  for (const host of bridge.hostAddresses) {
-    for (const port of DEFAULT_CONTROLLER_PORTS) {
-      push({
-        kind: 'tcp',
-        host,
-        port,
-        source: `WSL 宿主机的默认端口 ${port}`,
-        ...(secret ? { secret } : {}),
-      });
-    }
-  }
 }
 
 /** `host:port`（或 `http://host:port`）→ tcp 候选；非法值返回 undefined。 */
@@ -608,6 +558,7 @@ export async function discoverController(
   const tried = new Set(cheap.candidates.map(keyOf));
   const rest = plan.candidates.filter((c) => !tried.has(keyOf(c)));
   const second = await attemptEndpoints(rest, timeoutMs, Math.max(1000, budgetMs - (Date.now() - startedAt)));
+  if (second.found) return second.found;
 
   const attempts = [...first.attempts, ...second.attempts];
   if (plan.candidates.length === 0) {
@@ -646,61 +597,59 @@ async function tryEndpoint(endpoint: ControllerEndpoint, timeoutMs: number): Pro
   }
 }
 
-/** 平台相关的排查提示。 */
+/**
+ * 认不到控制端点时的提示。
+ *
+ * 默认只给「最可能的原因 + 一个能立刻执行的下一步」；平台差异、候选来源、配置示例
+ * 都放进 --verbose —— 排查信息给太多，真正的下一步反而会被埋掉。
+ */
 function hintText(facts: DiscoveryFacts, ctx: PlatformContext, attempts: readonly EndpointAttempt[] = []): string {
   const lines: string[] = [];
 
-  // 「代理端口 ≠ 控制端口」是最高频的误解，而且症状很迷惑（报了端口不可访问），
-  // 所以一旦看到代理端口的签名就把两者的区别讲清楚。
+  // 「代理端口 ≠ 控制端口」是最高频的误解：混合/HTTP 端口长得就像控制端口，
+  // 而它的症状（端口有应答但不像 mihomo）很迷惑人，所以这一条默认就要说。
   const proxyPorts = attempts.filter((a) => a.proxyPortLike).map((a) => a.endpoint);
   if (proxyPorts.length > 0) {
-    lines.push(
-      `${proxyPorts.join('、')} 应答的是「代理端口」，不是「控制端口」——这两个是不同用途的端口：`,
-      '  · 代理端口（混合/HTTP/SOCKS 端口）给浏览器与系统代理用，改成什么都与 afc 无关；',
-    );
+    lines.push(`${proxyPorts.join('、')} 是「代理端口」（混合/HTTP/SOCKS），不是「控制端口」——代理端口与 afc 无关。`);
   }
 
-  if (isWindows(ctx)) {
+  if (detectWsl()) {
     lines.push(
-      'Windows 上要找的是「外部控制地址」，它在客户端设置里单独一项：',
-      '  · Clash Verge Rev：设置 → Clash 设置 → 外部控制（默认 127.0.0.1:9097，也可以只靠命名管道）；',
-      '    同一页的「端口设置」（混合代理端口等）是代理端口，不是这个。',
-      '  · Clash Party：内核设置 → 外部控制地址 + 外部控制访问密钥；Windows 上默认走命名管道',
-      '    \\\\.\\pipe\\MihomoParty\\mihomo，改过端口的话记得重启内核。',
+      'afc 在 WSL 里连不到 Windows 上的 Clash（不在同一个网络命名空间，命名管道也跨不过去）。',
+      '请在 Windows 的 PowerShell / cmd 里运行：npm i -g auto-fix-clash && afc groups',
     );
-    if (facts.runtimeConfigs.length === 0) {
-      lines.push('这次没有读到任何运行时配置：确认客户端的数据目录（%APPDATA%\\<客户端 id>\\config.yaml）存在。');
-    } else if (facts.pipes.length === 0 && facts.kernelProcesses.length === 0) {
-      lines.push('这次既没枚举到像 mihomo 的命名管道，也没找到内核进程：内核可能没在运行。');
-    }
-  } else if (detectWsl()) {
-    // 在 WSL 里跑 afc、Clash 装在 Windows 宿主机上：这是"看着像 Clash 没在跑"的典型假象
+  } else if (isWindows(ctx)) {
     lines.push(
-      'afc 跑在 WSL 里，而 Clash 客户端在 Windows 宿主机的另一侧，两者不在同一个网络命名空间：',
-      '  · WSL2 的 127.0.0.1 是 WSL 自己的回环，命名管道也跨不过去 —— 所以要么让两者能通，要么把 afc 放到 Windows 上跑；',
-      '  · afc 已经默认帮你做了这些：读 /mnt/c 下 Windows 客户端的运行时配置（外部控制端口与密钥），',
-      '    并把候选主机名换成 127.0.0.1（镜像网络模式）+ 宿主机地址（NAT 模式）；',
-      '  · 剩下要满足的：镜像网络模式最省事 —— 在 Windows 的 %USERPROFILE%\\.wslconfig 里写',
-      '    [wsl2] networkingMode=mirrored，然后 wsl --shutdown 重启 WSL，127.0.0.1:9097 就通了；',
-      '  · NAT 模式则需要「局域网连接」打开、外部控制地址改成 0.0.0.0:9097、放行防火墙（9097 不对外时只有镜像模式能通）；',
-      '  · 另外 afc 探测节点还要 mihomo 内核二进制，WSL 里没有 —— 用 probe.kernelPath 指一个 Linux 版 mihomo，',
-      '    或者干脆在 Windows 的 PowerShell / cmd 里跑 afc（npm i -g auto-fix-clash）。',
+      '要填的是客户端里的「外部控制地址」（不是混合/HTTP 代理端口）：',
+      '  Clash Verge Rev：设置 → Clash 设置 → 外部控制（默认 127.0.0.1:9097）',
+      '  Clash Party：内核设置 → 外部控制地址（Windows 上默认走命名管道，无需填端口）',
     );
   } else {
     lines.push(
-      '要找的是「外部控制地址」（不是混合/HTTP/SOCKS 代理端口）：',
-      '  · Clash Verge Rev 默认 127.0.0.1:9097，Clash Party 用 Unix 套接字 /tmp/mihomo-party-<uid>-<pid>.sock。',
+      '要填的是客户端里的「外部控制地址」（不是混合/HTTP 代理端口）：',
+      '  Clash Verge Rev 默认 127.0.0.1:9097；Clash Party 用 /tmp/mihomo-party-<uid>-<pid>.sock',
     );
   }
 
-  lines.push(
-    '改过控制端口的话，把它写进配置（定时任务也读这里）：',
-    '  controller:',
-    '    endpoint: 127.0.0.1:9097      # 或 unix:/path.sock、pipe:\\\\.\\pipe\\MihomoParty\\mihomo',
-    '    secret: <外部控制访问密钥>     # 省略则从客户端运行时配置里读',
-    '    ports: [9191]                 # 自动发现时额外要试的端口',
-    '用 afc groups --verbose 可以看到「afc 到底找了哪些地方、每个候选源自哪里」。',
-  );
+  if (isVerbose()) {
+    if (isWindows(ctx)) {
+      if (facts.runtimeConfigs.length === 0) {
+        lines.push('这次没有读到任何运行时配置：确认客户端数据目录（%APPDATA%\<客户端 id>\）存在。');
+      } else if (facts.pipes.length === 0 && facts.kernelProcesses.length === 0) {
+        lines.push('这次既没枚举到像 mihomo 的命名管道，也没找到内核进程：内核可能没在运行。');
+      }
+    }
+    lines.push(
+      '也可以写进 afc.config.yaml（定时任务只读配置，不带命令行参数）：',
+      '  controller:',
+      '    endpoint: 127.0.0.1:9097      # 或 unix:/path.sock、pipe:\\\\.\\pipe\\MihomoParty\\mihomo',
+      '    secret: <外部控制访问密钥>     # 省略则从客户端运行时配置里读',
+      '    ports: [9191]                 # 自动发现时额外要试的端口',
+    );
+  } else {
+    lines.push('改过控制端口就写进 afc.config.yaml 的 controller.endpoint（定时任务也读它）。');
+    lines.push('afc groups --verbose 会打印「afc 找了哪些地方、每个候选源自哪里」。');
+  }
   return lines.join('\n');
 }
 
@@ -768,13 +717,6 @@ export function renderDiscoveryReport(report: DiscoveryReport): string {
     }
   }
 
-  if (facts.wslProfiles.length > 0) {
-    lines.push(`  WSL：Windows 用户目录 ${facts.wslProfiles.join('、')}`);
-    lines.push(`  WSL：候选宿主机地址 ${facts.wslHostAddresses.join('、')}`);
-  }
-  if (facts.wslConfigPaths.length > 0) {
-    lines.push(`  WSL：读到的 Windows 客户端配置 ${facts.wslConfigPaths.join('、')}`);
-  }
   if (facts.kernelPorts.length > 0) lines.push(`  内核监听端口：${facts.kernelPorts.join('、')}`);
   if (facts.sid) lines.push(`  当前用户 SID：${facts.sid}`);
   if (facts.vergePipes.length > 0) lines.push(`  按 SID 推导的 Verge 管道：${facts.vergePipes[0]}`);
