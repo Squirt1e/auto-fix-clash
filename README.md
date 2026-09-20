@@ -115,7 +115,9 @@ GPT：保持 [Normal x0.5] 日本 03（可用）
 ## 手动控制
 
 ```bash
-afc fix --group GPT       # 只处理指定组
+afc groups                # 列出代理组（第一列是编号）
+afc add 3                 # 用编号把第 3 个组交给 afc 管理（组名带 emoji 时省事）
+afc fix --group GPT       # 只处理指定组（也可写编号，如 --group 3）
 afc fix --dry-run         # 只看会怎么切，不做改动
 afc fix --no-auto         # 只处理配置里声明过的组
 afc doctor --json         # 机器可读，可直接喂给 jq

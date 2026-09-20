@@ -66,8 +66,8 @@ test('顶层帮助保持精简（避免一次倒出所有细节）', async () =>
 
 test('afc <命令> --help 打印该命令的用法', async () => {
   const cases: [string, RegExp][] = [
-    ['add', /用法：afc add <组名>/],
-    ['remove', /用法：afc remove <组名>/],
+    ['add', /用法：afc add <组名\|编号>/],
+    ['remove', /用法：afc remove <组名\|编号>/],
     ['groups', /用法：afc groups/],
     ['doctor', /用法：afc doctor/],
     ['fix', /用法：afc fix/],

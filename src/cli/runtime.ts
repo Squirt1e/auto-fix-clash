@@ -8,6 +8,7 @@ import {
   type DiscoverOptions,
   type DiscoveredController,
 } from '../controller/discovery.ts';
+import { isGroupIndexArg, resolveGroupArg } from './groups-index.ts';
 import { expandAutoTargets } from '../targets/auto.ts';
 import { optBoolean, optString, resolveTargets, type CommandContext } from './context.ts';
 
@@ -55,7 +56,19 @@ export async function openRuntime(context: CommandContext): Promise<Runtime> {
 }
 
 export function targetsFor(runtime: Runtime, context: CommandContext): TargetConfig[] {
-  return resolveTargets(runtime.config, context.values, requireTarget);
+  return resolveTargets(runtime.config, withResolvedGroup(context.values), requireTarget);
+}
+
+/**
+ * `--group` 也接受编号（`afc fix --group 3`）。
+ *
+ * 组名带 emoji 与中文时手打极易出错，而用户刚看过 afc groups 的编号，
+ * 让两处用同一套编号最省事。不是数字就原样返回。
+ */
+export function withResolvedGroup(values: Record<string, unknown>): Record<string, unknown> {
+  const group = optString(values, 'group');
+  if (!group || !isGroupIndexArg(group)) return values;
+  return { ...values, group: resolveGroupArg(group) };
 }
 
 export function isQuiet(context: CommandContext): boolean {
@@ -90,7 +103,7 @@ export async function planTargets(
   /** 已获取的 /proxies 结果，避免重复请求。 */
   knownProxies?: Record<string, ProxyInfo>,
 ): Promise<PlannedTargets> {
-  const group = optString(context.values, 'group');
+  const group = optString(withResolvedGroup(context.values), 'group');
   const config = runtime.config;
 
   if (group) {

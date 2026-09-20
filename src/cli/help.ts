@@ -11,7 +11,7 @@ export const TOP_HELP = `afc — 让 Clash 代理组自动选中「真正能用�
   remove <组名>      把某个组从配置里移除
 
 常用选项：
-  --group <name>   只处理这个组         --dry-run   只看会怎么切，不写入
+  --group <组名|编号>  只处理这个组    --dry-run   只看会怎么切，不写入
   --json           机器可读输出         --verbose   打印诊断信息与判定依据
   --config <path>  指定配置文件         --quiet     每次运行只留一行
   -v, --version    显示版本             -h, --help  显示本帮助
@@ -44,7 +44,7 @@ export const SCHEDULE_HELP = `用法：afc schedule <install|uninstall|status> [
 说明：任务只通过控制端点切换代理组的选中节点，不修改任何 Clash 配置。
 `;
 
-export const ADD_HELP = `用法：afc add <组名> [选项]
+export const ADD_HELP = `用法：afc add <组名|编号> [选项]
 
 把某个组加入管理，使其参与定时修复。
 
@@ -58,12 +58,16 @@ export const ADD_HELP = `用法：afc add <组名> [选项]
   --config <path>         写入哪个配置文件
   --force                 已存在同名条目时覆盖
 
+编号来自最近一次 afc groups（组名带 emoji / 中文时推荐用它，免得手打错）：
+  afc groups          # 第一列就是编号
+  afc add 3
+
 例：
   afc add Netflix
   afc add 我的组 --url https://example.com/generate_204 --expect 204
 `;
 
-export const REMOVE_HELP = `用法：afc remove <组名> [选项]
+export const REMOVE_HELP = `用法：afc remove <组名|编号> [选项]
 
 把某个组从配置里移除。
 若该组仍然"手动钉着某个节点"，它会被自动模式按通用可达性判据接管。
@@ -75,7 +79,11 @@ export const REMOVE_HELP = `用法：afc remove <组名> [选项]
 const GROUPS_HELP = `用法：afc groups [选项]
 
 列出当前订阅实际存在的代理组，并标出哪些会被 afc 处理。
-排序：受管理的组排在最前。
+排序：受管理的组排在最前；第一列是编号，可以直接拿去用：
+
+  afc add <编号>          把该组交给 afc 管理
+  afc remove <编号>       取消管理
+  afc fix --group <编号>  只处理该组（doctor 同理）
 
 选项：
   --json      机器可读输出
@@ -105,7 +113,7 @@ const DOCTOR_HELP = `用法：afc doctor [选项]
 状态码、出口国家与耗时。不会改动任何组的选择。
 
 选项：
-  --group <name>   只体检指定组
+  --group <组名|编号>  只体检指定组
   --json           机器可读输出
   --no-auto        只体检配置里声明过的组
   --verbose        额外打印判据与探测并发上限
@@ -119,7 +127,7 @@ const FIX_HELP = `用法：afc fix [选项]
 只通过控制端点改变组的选择，不写任何 Clash 配置。
 
 选项：
-  --group <name>   只处理指定组
+  --group <组名|编号>  只处理指定组
   --all            处理全部"该管的组"（默认行为）
   --no-auto        只处理配置里声明过的组
   --dry-run        只展示会怎么切，不写入

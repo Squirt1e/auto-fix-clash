@@ -2,11 +2,14 @@ import { isGroup } from '../../controller/client.ts';
 import { expandAutoTargets } from '../../targets/auto.ts';
 import { EXIT_ENVIRONMENT, EXIT_OK } from '../../exit-codes.ts';
 import { runtimeConfigPathCandidates } from '../../paths.ts';
+import { writeGroupsIndex } from '../groups-index.ts';
 import { pad } from '../format.ts';
 import { isQuiet, openRuntime } from '../runtime.ts';
 import { optBoolean, type CommandContext } from '../context.ts';
 
 export interface GroupRow {
+  /** 打印顺序里的编号；`afc add <编号>` 用它，免得手打 emoji 组名。 */
+  index: number;
   name: string;
   typeLabel: string;
   current: string;
@@ -68,6 +71,7 @@ export async function run(context: CommandContext): Promise<number> {
 
   const rows = sortGroupRows(
     groups.map(([name, info]) => ({
+      index: 0,
       name,
       typeLabel: GROUP_TYPE_LABEL[info.type] ?? info.type,
       current: info.now ?? '—',
@@ -77,6 +81,12 @@ export async function run(context: CommandContext): Promise<number> {
       switchable: info.type === 'Selector',
     })),
   );
+  // 编号 = 打印顺序（1 起）。落盘一份，`afc add <编号>` / `afc remove <编号>` 才认得出它。
+  rows.forEach((row, i) => { row.index = i + 1; });
+  writeGroupsIndex(
+    endpointAddress(runtime.controller.endpoint),
+    rows.map((r) => ({ name: r.name, type: r.typeLabel })),
+  );
 
   if (optBoolean(context.values, 'json')) {
     process.stdout.write(JSON.stringify({
@@ -84,6 +94,7 @@ export async function run(context: CommandContext): Promise<number> {
       kernelVersion: runtime.controller.version,
       runtimeConfig: runtimeConfigPathCandidates(runtime.config.probe.runtimeConfigPath)[0] ?? null,
       groups: rows.map((r) => ({
+        index: r.index,
         name: r.name,
         type: r.typeLabel,
         current: r.current,
@@ -108,13 +119,14 @@ export async function run(context: CommandContext): Promise<number> {
   }
 
   process.stdout.write(
-    pad('组名', 24) + pad('类型', 10) + pad('当前选中', 24) + '受 afc 管理\n',
+    pad('#', 4) + pad('组名', 24) + pad('类型', 10) + pad('当前选中', 24) + '受 afc 管理\n',
   );
-  process.stdout.write('-'.repeat(70) + '\n');
+  process.stdout.write('-'.repeat(74) + '\n');
   for (const r of rows) {
     // 只有手动选择组能被可靠指定成员；自动选择型组会被内核下次体检覆盖
     const manageState = r.configured ? '是' : r.managed ? '自动' : r.switchable ? '否' : '不可切换';
     process.stdout.write(
+      pad(String(r.index), 4) +
       pad(r.name, 24) +
       pad(r.typeLabel, 10) +
       pad(r.current, 24) +
@@ -130,10 +142,25 @@ export async function run(context: CommandContext): Promise<number> {
   } else if (rows.some((r) => !r.managed && r.switchable)) {
     process.stdout.write('\n标「否」的组不会被处理（--verbose 查看原因，或用 targets 显式声明）。\n');
   }
+
+  // 结尾给一条能直接抄的命令：组名常带 emoji，用编号比手打组名靠谱
+  const addable = rows.find((r) => r.switchable && !r.managed);
+  const sample = addable ?? rows.find((r) => r.switchable);
+  process.stdout.write(
+    '\n用编号操作（组名带 emoji 时尤其省事）：\n' +
+    `  afc add ${sample ? sample.index : '<编号>'}      把该组交给 afc 管理${sample ? `（例：${sample.name}）` : ''}\n` +
+    `  afc remove ${sample ? sample.index : '<编号>'}   取消管理\n` +
+    `  afc fix --group ${sample ? sample.index : '<编号>'}   只处理该组\n`,
+  );
   return EXIT_OK;
 }
 
+/** 端点地址本身（不带来源）。 */
+function endpointAddress(endpoint: { kind: string; path?: string; host?: string; port?: number }): string {
+  return endpoint.kind === 'tcp' ? `tcp:${endpoint.host}:${endpoint.port}` : `${endpoint.kind}:${endpoint.path}`;
+}
+
+/** 给人看的端点描述，带上它是怎么被发现的（排查问题时最关键的一列）。 */
 function describeEndpoint(endpoint: { kind: string; path?: string; host?: string; port?: number; source: string }): string {
-  const address = endpoint.kind === 'unix' ? `unix:${endpoint.path}` : `tcp:${endpoint.host}:${endpoint.port}`;
-  return `${address}（来源：${endpoint.source}）`;
+  return `${endpointAddress(endpoint)}（来源：${endpoint.source}）`;
 }

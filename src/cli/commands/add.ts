@@ -8,6 +8,7 @@ import { UsageError } from '../../errors.ts';
 import { EXIT_OK } from '../../exit-codes.ts';
 import { genericTarget, matchPreset, presetToTarget } from '../../targets/presets.ts';
 import { ADD_HELP } from '../help.ts';
+import { resolveGroupArg } from '../groups-index.ts';
 import { openRuntime } from '../runtime.ts';
 import { optBoolean, optString, type CommandContext } from '../context.ts';
 
@@ -48,17 +49,23 @@ export function resolveWritePath(explicit?: string): string {
 }
 
 export async function run(context: CommandContext): Promise<number> {
-  const groupName = context.positionals[0];
-  if (!groupName) {
+  const rawArg = context.positionals[0];
+  if (!rawArg) {
     process.stderr.write(ADD_HELP);
     return 64;
   }
+  // 支持 `afc add 3`：编号取自最近一次 afc groups（组名带 emoji 时省事且不易打错）
+  const groupName = resolveGroupArg(rawArg);
 
-  // 连控制器时不要把 --config 传进去：目标文件可能还不存在（本命令负责创建它）。
-  // 因此这里用 context 的副本，让端口/密钥等选项照常生效。
+  // --config 指向的文件可能还不存在（本命令负责创建它），那种情况下不能让 loadConfig
+  // 去读它（它会报"指定的配置文件不存在"）。但文件存在时就要读 —— 里面可能有 controller
+  // 段（外部控制端点/密钥/端口），忽略它会让 "afc add <编号> --config <那份配置>" 连不上。
+  const rawConfigArg = optString(context.values, 'config');
+  const configExists = rawConfigArg !== undefined
+    && existsSync(isAbsolute(rawConfigArg) ? rawConfigArg : resolve(rawConfigArg));
   const runtime = await openRuntime({
     positionals: context.positionals,
-    values: { ...context.values, config: undefined },
+    values: { ...context.values, config: configExists ? rawConfigArg : undefined },
   });
   const client = runtime.controller.client;
   const allProxies = await client.proxies();

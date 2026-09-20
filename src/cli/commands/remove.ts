@@ -2,13 +2,22 @@ import { readFileSync } from 'node:fs';
 import { removeTargetFromConfigText, writeConfigText } from '../../config-edit.ts';
 import { loadConfig, targetGroupNames } from '../../config.ts';
 import { EXIT_OK, EXIT_USAGE } from '../../exit-codes.ts';
+import { resolveGroupArg } from '../groups-index.ts';
 import { REMOVE_HELP } from '../help.ts';
 import { optString, type CommandContext } from '../context.ts';
 
 export async function run(context: CommandContext): Promise<number> {
-  const groupName = context.positionals[0];
-  if (!groupName) {
+  const rawArg = context.positionals[0];
+  if (!rawArg) {
     process.stderr.write(REMOVE_HELP);
+    return EXIT_USAGE;
+  }
+  // 支持 `afc remove 3`：编号取自最近一次 afc groups
+  let groupName: string;
+  try {
+    groupName = resolveGroupArg(rawArg);
+  } catch (err) {
+    process.stderr.write(`${(err as Error).message}\n`);
     return EXIT_USAGE;
   }
 
