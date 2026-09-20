@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { createServer as createHttpServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
@@ -24,7 +25,8 @@ const pExecFile = promisify(execFile);
  * 写 TAP 事件流，两边的写会互相串（第一次就是栽在这里）。子进程也顺带验证了真实入口。
  */
 async function runCli(args: string[]): Promise<{ code: number; out: string; err: string }> {
-  const cli = new URL('../src/cli/index.ts', import.meta.url).pathname;
+  // 必须用 fileURLToPath：Windows 上 URL.pathname 会给出 "/D:/a/..." 这种带前导斜杠的路径
+  const cli = fileURLToPath(new URL('../src/cli/index.ts', import.meta.url));
   try {
     const { stdout, stderr } = await pExecFile(process.execPath, [cli, ...args], { encoding: 'utf8' });
     return { code: EXIT_OK, out: stdout, err: stderr };
