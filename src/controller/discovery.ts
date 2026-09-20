@@ -16,6 +16,7 @@ import {
 import {
   currentPlatform,
   DEFAULT_CONTROLLER_PORTS,
+  detectWsl,
   isWindows,
   pipeCandidates,
   socketDirs,
@@ -614,6 +615,18 @@ function hintText(facts: DiscoveryFacts, ctx: PlatformContext, attempts: readonl
     } else if (facts.pipes.length === 0 && facts.kernelProcesses.length === 0) {
       lines.push('这次既没枚举到像 mihomo 的命名管道，也没找到内核进程：内核可能没在运行。');
     }
+  } else if (detectWsl()) {
+    // 在 WSL 里跑 afc、Clash 装在 Windows 宿主机上：这是"看着像 Clash 没在跑"的典型假象
+    lines.push(
+      'afc 现在跑在 WSL 里，而 Clash 客户端通常装在 Windows 宿主机上 —— 两者不在同一个网络命名空间：',
+      '  · WSL2 的 127.0.0.1 是它自己的回环，连不到宿主机的控制端口（宿主机的 127.0.0.1:9097 也不对外监听），',
+      '    命名管道更是完全用不了；',
+      '  · afc 探测节点还要用 mihomo 内核二进制，那个同样在 Windows 上。',
+      '请在 Windows 的 PowerShell / cmd 里跑 afc：npm i -g auto-fix-clash，再 afc groups。',
+      '确实要在 WSL 里用的话：Verge 打开「局域网连接」、把「外部控制器监听地址」改成 0.0.0.0:9097、放行防火墙，',
+      '然后 controller.endpoint 指向宿主机 IP（取 /etc/resolv.conf 里的 nameserver），',
+      '并用 probe.kernelPath 指一个 WSL 里可执行的 Linux 版 mihomo。',
+    );
   } else {
     lines.push(
       '要找的是「外部控制地址」（不是混合/HTTP/SOCKS 代理端口）：',

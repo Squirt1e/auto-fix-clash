@@ -178,6 +178,16 @@ controller:
 正常，那就是本项目的定时任务（它执行的是 `node`，macOS 按代码签名主体归类）。
 查看或关闭：系统设置 → 通用 → 登录项与扩展；`afc schedule status --verbose` 可核对任务文件路径。
 
+**在 WSL / 容器里跑 afc？**
+不行，得在**跑 Clash 的那台机器上**跑。WSL2 的 `127.0.0.1` 是它自己的回环，连不到 Windows 宿主机的
+控制端口（宿主机的 `127.0.0.1:9097` 也不对外监听），命名管道更是完全用不了；而且 afc 探测节点还要用
+mihomo 内核二进制，那个也在 Windows 上。症状很像「Clash 没在运行」，实际是跑错地方了 ——
+1.1.4 起 afc 会直接这么提示。在 Windows 的 PowerShell / cmd 里装一次即可：`npm i -g auto-fix-clash`。
+
+确实要在 WSL 里用的话，需要三件事齐全：Verge 打开「局域网连接」、把「外部控制器监听地址」改成
+`0.0.0.0:9097`、放行防火墙；再用 `controller.endpoint` 指向宿主机 IP（取 `/etc/resolv.conf` 的
+nameserver）；并用 `probe.kernelPath` 指一个 WSL 里可执行的 Linux 版 mihomo。
+
 **会改我的 Clash 配置吗？**
 不会。afc 只写这几处：系统调度器的任务定义（macOS 的 `~/Library/LaunchAgents/`、
 Linux 的 `~/.config/systemd/user/` 或 crontab、Windows 的任务计划程序数据库）、

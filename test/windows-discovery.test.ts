@@ -26,7 +26,13 @@ import {
   readRuntimeConfig,
   staticRuntimeConfigPaths,
 } from '../src/paths.ts';
-import { DEFAULT_CONTROLLER_PORTS, pipeCandidates, vergeSidecarPipeNames, type PlatformContext } from '../src/platform.ts';
+import {
+  DEFAULT_CONTROLLER_PORTS,
+  detectWsl,
+  pipeCandidates,
+  vergeSidecarPipeNames,
+  type PlatformContext,
+} from '../src/platform.ts';
 
 const WINDOWS_CTX: PlatformContext = {
   platform: 'win32',
@@ -375,4 +381,36 @@ test('--verbose 报告会列出「检查过但不存在」的配置路径', () =
   assert.match(text, /检查过的配置路径/);
   assert.match(text, /clash-verge\.yaml/);
   assert.match(text, /命名管道枚举/);
+});
+
+test('detectWsl 认得出 WSL（env 与 /proc/version 两条路）', () => {
+  assert.equal(detectWsl({ WSL_DISTRO_NAME: 'Ubuntu' }), true);
+  assert.equal(detectWsl({ WSL_INTEROP: '/run/WSL/8_interop' }), true);
+  // 本机是 macOS：没有 /proc/version，也没有 WSL 环境变量
+  assert.equal(detectWsl({}), false);
+});
+
+test('在 WSL 里跑时，报错会说明「Clash 在宿主机上，不在同一个网络命名空间」', async () => {
+  const closed = await freeClosedPort();
+  const previous = { ...process.env };
+  process.env['WSL_DISTRO_NAME'] = 'Ubuntu';
+  try {
+    await assert.rejects(
+      () => discoverController(
+        { explicit: `127.0.0.1:${closed}`, timeoutMs: 800 },
+        { platform: 'linux', home: '/home/x', env: process.env },
+      ),
+      (err: unknown) => {
+        const message = (err as Error).message;
+        assert.match(message, /WSL/);
+        assert.match(message, /网络命名空间/);
+        assert.match(message, /宿主机的控制端口/);
+        // WSL 的提示要压过通用的 POSIX 提示（后者会让人以为只是 Clash 没跑）
+        assert.doesNotMatch(message, /Clash Party 用 Unix 套接字/);
+        return true;
+      },
+    );
+  } finally {
+    process.env = previous;
+  }
 });

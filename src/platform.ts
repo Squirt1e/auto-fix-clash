@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { posix, win32 } from 'node:path';
 
@@ -46,6 +47,25 @@ export function joinLike(base: string, ...parts: string[]): string {
 
 export function isWindows(ctx: PlatformContext): boolean {
   return ctx.platform === 'win32';
+}
+
+/**
+ * 是否跑在 WSL 里。
+ *
+ * 为什么值得单独判断：在 WSL 里 `process.platform` 是 linux，但 Clash Verge / Clash Party
+ * 通常装在 Windows 宿主机上，两者**不在同一个网络命名空间** —— WSL2 里的 127.0.0.1 是
+ * WSL 自己的回环，连宿主机的控制端口只会得到 ECONNREFUSED，命名管道更是完全用不了。
+ * 更麻烦的是 afc 探测节点还需要 mihomo 内核二进制，那个也在 Windows 上。
+ * 症状看起来像「Clash 没在跑」，实际是跑错地方了，所以说清楚比让用户猜有用。
+ */
+export function detectWsl(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env['WSL_DISTRO_NAME'] || env['WSL_INTEROP']) return true;
+  try {
+    return /microsoft/i.test(readFileSync('/proc/version', 'utf8'));
+  } catch {
+    // 没有 /proc/version（Windows / macOS）或读不到
+    return false;
+  }
 }
 
 /**

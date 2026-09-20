@@ -8,6 +8,7 @@ import {
   clashPartyDataDirs,
   clashVergeDataDirs,
   currentPlatform,
+  detectWsl,
   isWindows,
   kernelCandidates,
   kernelExecutableNames,
@@ -44,6 +45,11 @@ export class KernelNotFoundError extends Error {
   constructor(tried: string[]) {
     super(
       '找不到 mihomo 内核二进制。\n' +
+      (detectWsl()
+        ? '检测到 afc 跑在 WSL 里：Clash 与 mihomo 内核都在 Windows 宿主机上，WSL 里看不到它们。\n'
+          + '请在 Windows 的 PowerShell / cmd 里运行 afc；确实要在 WSL 里用的话，\n'
+          + '用 probe.kernelPath 指一个 WSL 里可执行的 Linux 版 mihomo。\n'
+        : '') +
       '已尝试的位置：\n' + tried.map((p) => `  - ${p}`).join('\n') + '\n' +
       '请在 afc 配置里设置 probe.kernelPath 指定内核路径，\n' +
       '或确认 Clash Party / Clash Verge 已安装（本项目不下载、不内置内核）。',
