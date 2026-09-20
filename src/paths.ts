@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { accessSync, constants, existsSync, readdirSync, readFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import { isVerbose } from './verbosity.ts';
 import {
   joinFor,
   joinLike,
@@ -9,7 +10,9 @@ import {
   clashVergeDataDirs,
   currentPlatform,
   detectWsl,
+  dirnameLike,
   isWindows,
+  looksLikeWindowsPath,
   kernelCandidates,
   kernelExecutableNames,
   pipeCandidates,
@@ -27,8 +30,16 @@ export function clashVergeDataDir(ctx: PlatformContext = currentPlatform()): str
   return clashVergeDataDirs(ctx)[0]!;
 }
 
-function isExecutableFile(path: string): boolean {
+/**
+ * 这个路径能不能拿来当内核用。
+ *
+ * Windows 上没有可执行位（`X_OK` 在那里没有意义），所以只要求「存在且是文件」；
+ * POSIX 上仍然要求可执行，免得把同名目录或数据文件当内核。
+ */
+function isExecutableFile(path: string, ctx: PlatformContext = currentPlatform()): boolean {
   try {
+    if (!statSync(path).isFile()) return false;
+    if (isWindows(ctx)) return true;
     accessSync(path, constants.X_OK);
     return true;
   } catch {
@@ -41,34 +52,197 @@ export function kernelPathCandidates(ctx: PlatformContext = currentPlatform()): 
   return kernelCandidates(ctx);
 }
 
+/** 客户端主程序（GUI）的镜像名 —— 用它来推断内核在哪：内核就在它旁边。 */
+const CLIENT_IMAGE_PATTERN = /^(clash[- ]?verge|verge|clash[- ]?party|mihomo[- ]?party)(\.exe)?$/i;
+/** 客户端主程序在 POSIX 上的命令行特征。 */
+const CLIENT_COMMAND_PATTERN = /(Clash Verge|Clash Party|mihomo-party)(\.app)?\//;
+
+/**
+ * 从「正在运行的进程」推断内核路径。
+ *
+ * 这是最可靠的一条：Verge 自己解析内核就是取 `current_exe()` 的同级文件，
+ * 所以只要拿到客户端主程序的位置，内核一定在它旁边 —— 自定义目录、便携版、别的盘都能覆盖。
+ * 其次，正在运行的内核进程本身的 exe 路径当然也可以直接用。
+ */
+export function kernelPathsFromProcesses(ctx: PlatformContext = currentPlatform()): string[] {
+  const found: string[] = [];
+  const remember = (path: string | undefined): void => {
+    if (!path) return;
+    if (!found.includes(path) && isExecutableFile(path, ctx)) found.push(path);
+  };
+  for (const proc of listKernelProcesses(ctx)) remember(proc.execPath);
+  for (const proc of listClientProcesses(ctx)) {
+    for (const path of siblingKernelPaths(proc.execPath)) remember(path);
+  }
+  return found;
+}
+
+/** 镜像名像不像客户端主程序（Clash Verge / Clash Party 的 GUI）。 */
+export function isClientImageName(name: string): boolean {
+  return name !== '' && CLIENT_IMAGE_PATTERN.test(name.trim());
+}
+
+/**
+ * 命令行像不像客户端主程序。
+ *
+ * macOS 上内核也在 .app 里（`Contents/Resources/sidecar/mihomo`），所以还得看**可执行文件名**：
+ * 名字像内核的就不是客户端主程序。
+ */
+export function isClientCommand(command: string): boolean {
+  if (!CLIENT_COMMAND_PATTERN.test(command)) return false;
+  // 名字像内核、或路径里有 sidecar 的，是内核而不是客户端主程序
+  return !/[\\/](verge-)?mihomo(\s|$)|[\\/]sidecar[\\/]/i.test(command);
+}
+
+/**
+ * 从客户端命令行推出 macOS 主程序路径。
+ *
+ * 不能简单地取"首个空格前的 token"：`/Applications/Clash Party.app/Contents/MacOS/Clash Party`
+ * 里带空格，会被截断。.app 的布局是固定的，直接按 bundle 推更可靠。
+ */
+export function appBundleBinary(command: string): string | undefined {
+  const match = /^(.*?)\.app[\\/]Contents[\\/]/.exec(command.trim());
+  if (!match?.[1]) return undefined;
+  const root = `${match[1]}.app`;
+  const name = posixBasename(root).replace(/\.app$/, '');
+  return posixJoin(root, 'Contents', 'MacOS', name);
+}
+
+function posixBasename(p: string): string {
+  return p.slice(p.lastIndexOf('/') + 1);
+}
+
+function posixJoin(...parts: string[]): string {
+  return parts.join('/').replace(/\/{2,}/g, '/');
+}
+
+/** 正在运行的客户端主程序（Clash Verge / Clash Party 的 GUI 进程）。 */
+export function listClientProcesses(ctx: PlatformContext = currentPlatform()): KernelProcess[] {
+  const results: KernelProcess[] = [];
+  for (const { pid, name, command, execPath } of runProcessList(ctx)) {
+    if (command?.includes('afc-probe')) continue;
+    const byName = isClientImageName(name);
+    const byCommand = command !== undefined && isClientCommand(command);
+    if (!byName && !byCommand) continue;
+    // macOS 上没有 /proc：用 .app 布局推出主程序路径；其它 POSIX 用命令行首 token
+    const resolved = execPath ?? (command ? appBundleBinary(command) ?? firstTokenPath(command) : undefined);
+    if (!resolved) continue;
+    results.push({ pid, command: command ?? name, execPath: resolved });
+  }
+  return results;
+}
+
+/**
+ * 客户端主程序旁边可能放内核的位置。
+ *
+ * - Clash Verge (Rev)：`verge-mihomo(.exe)` / `verge-mihomo-alpha(.exe)` 与主程序同级
+ *   （其 bundle 配置声明的 externalBin 就是 sidecar/verge-mihomo 与 sidecar/verge-mihomo-alpha）；
+ * - Clash Party：`resources/sidecar/mihomo(.exe)`（macOS 上是 Contents/Resources/sidecar/mihomo）；
+ * - 便携版/自定义目录同样适用：都只依赖「主程序在哪」。
+ */
+export function siblingKernelPaths(exePath: string | undefined): string[] {
+  if (!exePath) return [];
+  const dir = dirnameLike(exePath);
+  const parent = dirnameLike(dir);
+  // 扩展名跟随「主程序路径的风格」，不跟随当前系统：这样同一份逻辑既能处理
+  // Windows 的自定义安装目录，也能处理 macOS 的 .app 布局（测试里也能造两种路径）。
+  const names = looksLikeWindowsPath(exePath)
+    ? ['verge-mihomo.exe', 'verge-mihomo-alpha.exe', 'mihomo.exe', 'mihomo-alpha.exe', 'clash-meta.exe']
+    : ['verge-mihomo', 'verge-mihomo-alpha', 'mihomo', 'mihomo-alpha', 'clash-meta'];
+  const out: string[] = [];
+  for (const name of names) {
+    out.push(joinLike(dir, name));
+    // Clash Party 把内核放在 resources/sidecar/ 下
+    out.push(joinLike(dir, 'resources', 'sidecar', name));
+    // macOS：Contents/MacOS/xxx → Contents/Resources/sidecar/mihomo
+    out.push(joinLike(parent, 'Resources', 'sidecar', name));
+    out.push(joinLike(parent, 'Resources', name));
+  }
+  return out;
+}
+
+/** 在目录里有限深度地找内核文件（自定义布局的兜底）。 */
+export function scanKernelInDirs(dirs: readonly string[], ctx: PlatformContext = currentPlatform(), maxDepth = 2): string[] {
+  const pattern = /^(verge-)?mihomo(-alpha)?(\.exe)?$|^clash[-_]meta(\.exe)?$/i;
+  const found: string[] = [];
+  const walk = (dir: string, depth: number): void => {
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = joinLike(dir, entry.name);
+      if (entry.isFile()) {
+        if (pattern.test(entry.name) && isExecutableFile(path, ctx)) found.push(path);
+        continue;
+      }
+      if (entry.isDirectory() && depth > 0) walk(path, depth - 1);
+    }
+  };
+  for (const dir of dirs) walk(dir, maxDepth);
+  return found;
+}
+
 export class KernelNotFoundError extends Error {
-  constructor(tried: string[]) {
-    super(
-      '找不到 mihomo 内核二进制。\n' +
-      (detectWsl()
-        ? '检测到 afc 跑在 WSL 里：Clash 与 mihomo 内核都在 Windows 宿主机上，WSL 里看不到它们。\n'
-          + '请在 Windows 的 PowerShell / cmd 里运行 afc；确实要在 WSL 里用的话，\n'
-          + '用 probe.kernelPath 指一个 WSL 里可执行的 Linux 版 mihomo。\n'
-        : '') +
-      '已尝试的位置：\n' + tried.map((p) => `  - ${p}`).join('\n') + '\n' +
-      '请在 afc 配置里设置 probe.kernelPath 指定内核路径，\n' +
-      '或确认 Clash Party / Clash Verge 已安装（本项目不下载、不内置内核）。',
+  constructor(tried: string[], ctx: PlatformContext = currentPlatform()) {
+    // 默认只留「发生了什么 + 一个能立刻执行的下一步」；完整清单交给 --verbose，
+    // 否则十几行路径会把真正要看的那句话埋掉。
+    const lines = [
+      '找不到 mihomo 内核二进制（doctor / fix 需要它起临时实例来逐个探节点）。',
+    ];
+    if (detectWsl()) {
+      lines.push('afc 在 WSL 里看不到 Windows 上的内核：请在 Windows 的 PowerShell / cmd 里运行 afc。');
+    }
+    lines.push(
+      '在 afc.config.yaml 里指定它即可（路径写内核文件本身）：',
+      '  probe:',
+      `    kernelPath: <Clash 安装目录>${isWindows(ctx) ? '\\verge-mihomo.exe' : '/verge-mihomo'}`,
     );
+    if (isVerbose()) {
+      lines.push('已尝试的位置：', ...tried.map((p) => `  - ${p}`));
+    } else {
+      lines.push('已找过 Clash Verge / Clash Party 的常见位置、正在运行的进程与 PATH：加 --verbose 看完整清单。');
+    }
+    super(lines.join('\n'));
     this.name = 'KernelNotFoundError';
   }
 }
 
-/** 定位 mihomo 内核二进制：显式路径 > 已知位置 > PATH。 */
+/**
+ * 定位 mihomo 内核二进制。
+ *
+ * 顺序按可靠性：显式路径 → 正在运行的进程（内核自己 / 客户端同级）→ 已知安装位置
+ * → 客户端目录里有限深度扫描 → PATH。
+ * 前三步覆盖了「客户端装在哪儿都能找到」，第四步是自定义布局的兜底。
+ */
 export function findKernelBinary(explicit?: string, ctx: PlatformContext = currentPlatform()): string {
   const tried: string[] = [];
   if (explicit) {
-    if (isExecutableFile(explicit)) return explicit;
-    tried.push(`${explicit}（配置中指定，不可执行）`);
+    if (isExecutableFile(explicit, ctx)) return explicit;
+    tried.push(`${explicit}（配置中指定，不是可执行文件）`);
   }
+
+  for (const path of kernelPathsFromProcesses(ctx)) {
+    tried.push(`${path}（来自正在运行的进程）`);
+    if (isExecutableFile(path, ctx)) return path;
+  }
+
   for (const candidate of kernelPathCandidates(ctx)) {
     tried.push(candidate);
-    if (isExecutableFile(candidate)) return candidate;
+    if (isExecutableFile(candidate, ctx)) return candidate;
   }
+
+  const clientDirs = listClientProcesses(ctx)
+    .map((proc) => (proc.execPath ? dirname(proc.execPath) : undefined))
+    .filter((d): d is string => d !== undefined);
+  const scanned = scanKernelInDirs(clientDirs, ctx);
+  for (const path of scanned) {
+    tried.push(`${path}（在客户端目录里扫描到）`);
+    if (isExecutableFile(path, ctx)) return path;
+  }
+
   const lookup = isWindows(ctx) ? { cmd: 'where', args: [] } : { cmd: 'which', args: [] };
   for (const name of kernelExecutableNames(ctx)) {
     try {
@@ -77,13 +251,13 @@ export function findKernelBinary(explicit?: string, ctx: PlatformContext = curre
         stdio: ['ignore', 'pipe', 'ignore'],
       }).trim();
       // where 可能返回多行，取第一行
-      const found = out.split(/\r?\n/)[0]?.trim();
-      if (found && isExecutableFile(found)) return found;
+      const foundOut = out.split(/\r?\n/)[0]?.trim();
+      if (foundOut && isExecutableFile(foundOut, ctx)) return foundOut;
     } catch {
       tried.push(`PATH 中的 ${name}`);
     }
   }
-  throw new KernelNotFoundError(tried);
+  throw new KernelNotFoundError(tried, ctx);
 }
 
 /** 运行中的 mihomo 进程信息。 */
@@ -92,6 +266,8 @@ export interface KernelProcess {
   command: string;
   /** Windows 上的镜像名（例如 verge-mihomo.exe）。 */
   name?: string;
+  /** 进程可执行文件的完整路径（能拿到就用它当内核路径 —— 那正是正在运行的那个二进制）。 */
+  execPath?: string;
   /** 由 -d 指定的工作目录。 */
   workDir?: string;
   /** 由 -f 指定的配置文件（Clash Verge 会显式传它，是最准确的运行时配置）。 */
@@ -166,6 +342,8 @@ export interface WindowsProcessEntry {
   pid: number;
   name: string;
   command?: string;
+  /** 进程可执行文件的完整路径（WMI 的 ExecutablePath；别人的/SYSTEM 进程可能读不到）。 */
+  execPath?: string;
 }
 
 /** 解析 PowerShell `Get-CimInstance Win32_Process ... | ConvertTo-Json` 的输出（单对象/数组都认）。 */
@@ -180,14 +358,17 @@ export function parseWindowsProcessJson(raw: string): WindowsProcessEntry[] {
   const list = Array.isArray(parsed) ? parsed : [parsed];
   for (const item of list) {
     if (typeof item !== 'object' || item === null) continue;
-    const rec = item as { ProcessId?: unknown; Name?: unknown; CommandLine?: unknown };
+    const rec = item as { ProcessId?: unknown; Name?: unknown; CommandLine?: unknown; ExecutablePath?: unknown };
     const pid = typeof rec.ProcessId === 'number' ? rec.ProcessId : Number(rec.ProcessId);
     if (!Number.isInteger(pid) || pid <= 0) continue;
     const name = typeof rec.Name === 'string' ? rec.Name : '';
     const command = typeof rec.CommandLine === 'string' && rec.CommandLine.trim() !== ''
       ? rec.CommandLine.trim()
       : undefined;
-    entries.push({ pid, name, ...(command ? { command } : {}) });
+    const execPath = typeof rec.ExecutablePath === 'string' && rec.ExecutablePath.trim() !== ''
+      ? rec.ExecutablePath.trim()
+      : undefined;
+    entries.push({ pid, name, ...(command ? { command } : {}), ...(execPath ? { execPath } : {}) });
   }
   return entries;
 }
@@ -237,11 +418,14 @@ export function parseWindowsNetstatListeners(raw: string, pids: readonly number[
 
 /** 单次 Windows 进程列表调用比较贵（子进程启动 + 查询），同一个进程里只查一次。 */
 let windowsProcessCache: WindowsProcessEntry[] | undefined;
+/** POSIX 的 ps 也要避免重复调用（内核发现与内核路径查找会各查一次）。 */
+let posixProcessCache: WindowsProcessEntry[] | undefined;
 
 /** 清掉进程列表缓存（测试与「内核刚重启」这类场景用）。 */
 export function clearWindowsProcessCache(): void {
   windowsProcessCache = undefined;
   windowsUserSidCache = undefined;
+  posixProcessCache = undefined;
 }
 
 function runPowerShell(script: string): string | undefined {
@@ -287,7 +471,7 @@ function tryPowerShellCommands(pids: readonly number[]): Map<number, string> {
   const raw = runPowerShell(
     '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ' +
       `Get-CimInstance Win32_Process -Filter "${filter}" | ` +
-      'Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress',
+      'Select-Object ProcessId,Name,CommandLine,ExecutablePath | ConvertTo-Json -Compress',
   );
   if (!raw) return found;
   for (const entry of parseWindowsProcessJson(raw)) {
@@ -323,7 +507,7 @@ function runWindowsProcessList(): WindowsProcessEntry[] {
   if (entries.length === 0) {
     const raw = runPowerShell(
       '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ' +
-        'Get-CimInstance Win32_Process | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress',
+        'Get-CimInstance Win32_Process | Select-Object ProcessId,Name,CommandLine,ExecutablePath | ConvertTo-Json -Compress',
     );
     entries = raw ? parseWindowsProcessJson(raw) : [];
   }
@@ -334,9 +518,10 @@ function runWindowsProcessList(): WindowsProcessEntry[] {
 
 /** 列出正在运行的内核进程与它的原始命令行。 */
 function runProcessList(ctx: PlatformContext): WindowsProcessEntry[] {
-  const out: WindowsProcessEntry[] = [];
   if (isWindows(ctx)) return runWindowsProcessList();
+  if (posixProcessCache) return posixProcessCache;
 
+  const out: WindowsProcessEntry[] = [];
   let psOut: string;
   try {
     psOut = execFileSync('ps', ['-axo', 'pid=,command='], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
@@ -348,9 +533,30 @@ function runProcessList(ctx: PlatformContext): WindowsProcessEntry[] {
     if (!match) continue;
     const [, pidText, command] = match;
     if (!command) continue;
-    out.push({ pid: Number(pidText), name: '', command });
+    const pid = Number(pidText);
+    // 命令行首 token 通常就是可执行文件路径；/proc/<pid>/exe 更权威（Linux 有，macOS 没有）
+    const execPath = procExecPath(pid) ?? firstTokenPath(command);
+    out.push({ pid, name: '', command, ...(execPath ? { execPath } : {}) });
   }
+  posixProcessCache = out;
   return out;
+}
+
+/** 命令行首 token 若是绝对路径就当作可执行文件（去掉可能的引号）。 */
+function firstTokenPath(command: string): string | undefined {
+  const match = /^"([^"]+)"|^(\S+)/.exec(command.trim());
+  const token = (match?.[1] ?? match?.[2] ?? '').trim();
+  return token.startsWith('/') ? token : undefined;
+}
+
+/** Linux 上 /proc/<pid>/exe 指向真实的可执行文件（被替换过也能拿到）。 */
+function procExecPath(pid: number): string | undefined {
+  try {
+    const target = readlinkSync(`/proc/${pid}/exe`);
+    return target.startsWith('/') ? target : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** 列出正在运行的 mihomo 内核进程（含工作目录与控制端点参数）。 */

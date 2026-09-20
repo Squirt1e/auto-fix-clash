@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';
 import { MihomoClient } from '../controller/client.ts';
 import type { ControllerEndpoint } from '../controller/http.ts';
-import { findKernelBinary } from '../paths.ts';
+import { findKernelBinary, KernelNotFoundError } from '../paths.ts';
 
 /** 探针组名前缀；每个并发通道对应一个组 + 一个独立入站端口。 */
 const PROBE_GROUP_PREFIX = '__AFC_PROBE_';
@@ -28,6 +28,9 @@ function freePort(): Promise<number> {
 }
 
 const PROBE_TEMP_PREFIX = 'afc-probe-';
+
+/** 永久性的准备失败（配置缺失、内核不在），重试没有意义。 */
+class ProbeSetupError extends Error {}
 /** 超过这个时间的残留临时目录会被清理（进程被强杀时来不及自我清理）。 */
 const STALE_TEMP_MS = 60 * 60 * 1000;
 
@@ -130,6 +133,9 @@ export class ProbeInstance {
         return await ProbeInstance.startOnce(options);
       } catch (err) {
         lastError = err as Error;
+        // 配置/环境类问题重试没有意义：重试只会拖慢报错，还会把"内核没找到"
+        // 这种确定结论说成"（已重试 1 次）"，看起来像临时故障
+        if (err instanceof KernelNotFoundError || err instanceof ProbeSetupError) throw err;
         if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, 2000));
       }
     }
@@ -137,8 +143,8 @@ export class ProbeInstance {
   }
 
   private static async startOnce(options: ProbeInstanceOptions): Promise<ProbeInstance> {
-    if (options.proxies.length === 0) throw new Error('运行时配置中没有可用的节点定义，无法启动探针实例');
-    if (options.nodeNames.length === 0) throw new Error('没有可切换的节点，无法启动探针实例');
+    if (options.proxies.length === 0) throw new ProbeSetupError('运行时配置中没有可用的节点定义，无法启动探针实例');
+    if (options.nodeNames.length === 0) throw new ProbeSetupError('没有可切换的节点，无法启动探针实例');
     const kernelPath = findKernelBinary(options.kernelPath);
     const channels = Math.max(1, options.channels ?? 1);
     const startupTimeoutMs = options.startupTimeoutMs ?? 45000;
