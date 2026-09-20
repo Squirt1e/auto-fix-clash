@@ -10,7 +10,8 @@ import {
   buildCreateArgs,
   buildTaskCommand,
   intervalToMinutes,
-  parseQuery,
+  parseQueryCsv,
+  parseScheduledTaskJson,
   TASK_NAME,
 } from '../src/schedule/schtasks.ts';
 import {
@@ -121,13 +122,38 @@ test('schtasks：含空格的路径会被正确引用，并把日志交给 --log
   assert.match(command, /--log-file/);
 });
 
-test('schtasks：查询输出可解析出安装状态与最近结果', () => {
-  const installed = parseQuery('TaskName:       \\auto-fix-clash-heal\nNext Run Time:  2026/9/19 4:00:00\nLast Result:    0\n');
-  assert.equal(installed.installed, true);
-  assert.equal(installed.lastResult, '0');
+test('schtasks：状态取自 PowerShell 的结构化输出（与系统语言无关）', () => {
+  const installed = parseScheduledTaskJson(
+    '{"installed":true,"state":"Ready","lastResult":"0","lastRun":"2026-09-20T21:55:00","nextRun":"2026-09-20T22:00:00"}',
+  );
+  assert.equal(installed?.installed, true);
+  assert.equal(installed?.state, 'Ready');
+  assert.equal(installed?.lastResult, '0');
+  assert.equal(installed?.source, 'powershell');
 
-  const missing = parseQuery('ERROR: The system cannot find the file specified.');
-  assert.equal(missing.installed, false);
+  // 没装：Get-ScheduledTask 返回空
+  assert.equal(parseScheduledTaskJson('{"installed":false}')?.installed, false);
+  // 从未运行过时这些字段是 null 或 1601 占位值，不要显示成"上次运行结果 1601..."
+  const never = parseScheduledTaskJson('{"installed":true,"lastResult":null,"lastRun":"1601-01-01T00:00:00","nextRun":"2026-09-20T22:00:00"}');
+  assert.equal(never?.lastResult, undefined);
+  assert.equal(never?.lastRun, undefined);
+  assert.equal(never?.nextRun, '2026-09-20T22:00:00');
+  // 坏输入不该崩
+  assert.equal(parseScheduledTaskJson('不是 JSON'), undefined);
+  assert.equal(parseScheduledTaskJson(''), undefined);
+});
+
+test('schtasks：PowerShell 不可用时按列解析 CSV（中文/GBK 输出也能认出来）', () => {
+  // 真实的中文 Windows 输出（表头与状态都是本地化文字，且按 GBK 编码）——只看列位置
+  const csv = '"主机名","任务名","下次运行时间","状态","登录模式","上次运行时间","上次运行结果"\r\n' +
+    '"DESKTOP-ABC","\\auto-fix-clash-heal","2026/9/20 22:00:00","就绪","交互式","2026/9/20 21:55:00","0"\r\n';
+  const parsed = parseQueryCsv(csv);
+  assert.equal(parsed.lastResult, '0');
+  assert.equal(parsed.state, '就绪');
+  assert.equal(parsed.nextRun, '2026/9/20 22:00:00');
+  // 乱码的表头/状态也不影响按列取值（任务名是 ASCII，永远认得出）
+  assert.equal(parseQueryCsv('"DESKTOP-ABC","\\auto-fix-clash-heal","x","\uFFFD\uFFFD","y","z","0"').lastResult, '0');
+  assert.deepEqual(parseQueryCsv('没有任何行'), {});
 });
 
 test('后端按平台选择，并且能强制指定', async () => {
