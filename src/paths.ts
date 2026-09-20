@@ -144,11 +144,15 @@ const KERNEL_COMMAND_PATTERN = /(^|[\\/])(verge-mihomo|mihomo|clash-meta)(\.exe)
  *
  * 为什么不用命令行：内核可能由 Clash Verge 的服务模式以 SYSTEM 身份启动，
  * 普通用户通过 WMI 读到的 CommandLine 会是空的 —— 但镜像名一定读得到。
+ * 用「包含 mihomo / clash-meta」这种宽松匹配，是为了兼容自定义命名的内核
+ * （误判的代价只是多探一个端口，不会出错）。
  */
-const WINDOWS_KERNEL_IMAGE = /^(verge-mihomo(-alpha)?|clash-verge-mihomo|mihomo|clash-meta|mihomo-party)(\.exe)?$/i;
+const WINDOWS_KERNEL_IMAGE = /(mihomo|clash[-_]meta)/i;
 
 export function isKernelImageName(name: string): boolean {
-  return WINDOWS_KERNEL_IMAGE.test(name.trim());
+  const base = name.trim().replace(/\.exe$/i, '');
+  if (base === '') return false;
+  return WINDOWS_KERNEL_IMAGE.test(base) && !base.toLowerCase().startsWith('afc-');
 }
 
 /** Windows 进程列表条目（命令行可能缺失）。 */
@@ -225,7 +229,7 @@ export function parseWindowsNetstatListeners(raw: string, pids: readonly number[
   return ports;
 }
 
-/** 单次 Windows 进程列表调用比较贵（PowerShell 启动 + WMI 查询），同一个进程里只查一次。 */
+/** 单次 Windows 进程列表调用比较贵（子进程启动 + 查询），同一个进程里只查一次。 */
 let windowsProcessCache: WindowsProcessEntry[] | undefined;
 
 /** 清掉进程列表缓存（测试与「内核刚重启」这类场景用）。 */
@@ -250,37 +254,74 @@ function runPowerShell(script: string): string | undefined {
   return undefined;
 }
 
+function tryTasklist(): WindowsProcessEntry[] {
+  try {
+    return parseWindowsTasklistCsv(
+      execFileSync('tasklist.exe', ['/FO', 'CSV', '/NH'], {
+        encoding: 'utf8',
+        maxBuffer: 16 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+      }),
+    );
+  } catch {
+    return [];
+  }
+}
+
 /**
- * 列出 Windows 上所有进程（镜像名 + 命令行）。
+ * 取指定进程的命令行（只查这些 PID，不做全量扫描）。
  *
- * 两个必须注意的点：
- *   1. Windows PowerShell 5.1 默认按控制台代码页（简中是 GBK）写 stdout，
- *      用 UTF-8 解码会把中文用户名一类的命令行弄成乱码，因此先强制 UTF-8 输出；
- *   2. 服务模式下的内核进程读不到 CommandLine（WMI 对非本用户进程会返回空），
- *      所以命令行只当加分项，镜像名才是判据。
+ * Windows PowerShell 5.1 默认按控制台代码页（简中是 GBK）写 stdout，
+ * 用 UTF-8 解码会把中文用户名一类的命令行弄成乱码，因此先强制 UTF-8 输出。
+ */
+function tryPowerShellCommands(pids: readonly number[]): Map<number, string> {
+  const found = new Map<number, string>();
+  const filter = pids.map((pid) => `ProcessId=${pid}`).join(' or ');
+  const raw = runPowerShell(
+    '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ' +
+      `Get-CimInstance Win32_Process -Filter "${filter}" | ` +
+      'Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress',
+  );
+  if (!raw) return found;
+  for (const entry of parseWindowsProcessJson(raw)) {
+    if (entry.command) found.set(entry.pid, entry.command);
+  }
+  return found;
+}
+
+/**
+ * 列出 Windows 上的进程（镜像名 + 能读到的命令行）。
+ *
+ * 顺序是刻意的：
+ *   1. `tasklist` 拿全部进程的镜像名与 PID —— 只要一两百毫秒，且不受权限影响；
+ *   2. 只对「镜像名像内核」的那几个 PID 再查命令行（`-d` / `-f` / `-ext-ctl*` 都在里面）——
+ *      服务模式下内核以 SYSTEM 身份运行，普通用户读不到它的 CommandLine，
+ *      这时镜像名就是唯一可用的判据；
+ *   3. tasklist 都不可用时才退回全量 WMI 扫描。
+ * 全量 WMI 很贵（实测在 CI 上要十几秒），所以不能每次发现都跑它。
  */
 function runWindowsProcessList(): WindowsProcessEntry[] {
   if (windowsProcessCache) return windowsProcessCache;
-  const script =
-    '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ' +
-    'Get-CimInstance Win32_Process | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress';
-  const raw = runPowerShell(script);
-  let entries = raw ? parseWindowsProcessJson(raw) : [];
-  if (entries.length === 0) {
-    // PowerShell 不可用（被策略禁用、精简系统）时退回 tasklist：只有镜像名，但足够定位 PID
-    try {
-      entries = parseWindowsTasklistCsv(
-        execFileSync('tasklist.exe', ['/FO', 'CSV', '/NH'], {
-          encoding: 'utf8',
-          maxBuffer: 16 * 1024 * 1024,
-          stdio: ['ignore', 'pipe', 'ignore'],
-          windowsHide: true,
-        }),
-      );
-    } catch {
-      entries = [];
-    }
+
+  let entries = tryTasklist();
+  const kernelPids = entries.filter((e) => isKernelImageName(e.name)).map((e) => e.pid);
+  if (kernelPids.length > 0) {
+    const commands = tryPowerShellCommands(kernelPids);
+    entries = entries.map((e) => {
+      const command = commands.get(e.pid);
+      return command ? { ...e, command } : e;
+    });
   }
+
+  if (entries.length === 0) {
+    const raw = runPowerShell(
+      '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ' +
+        'Get-CimInstance Win32_Process | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress',
+    );
+    entries = raw ? parseWindowsProcessJson(raw) : [];
+  }
+
   windowsProcessCache = entries;
   return entries;
 }
@@ -326,9 +367,38 @@ export function listKernelProcesses(ctx: PlatformContext = currentPlatform()): K
 }
 
 /**
+ * 只按「已知数据目录」列出的运行时配置路径（不启任何子进程，因此很便宜）。
+ *
+ * Clash Verge 把运行时配置写在数据目录下的 config.yaml；
+ * Clash Party 写在 <dataDir>/work/config.yaml（diffWorkDir 时在 work/<profileId>/ 下）。
+ */
+export function staticRuntimeConfigPaths(
+  explicit?: string,
+  ctx: PlatformContext = currentPlatform(),
+): string[] {
+  const j = joinFor(ctx);
+  const paths: string[] = [];
+  if (explicit) paths.push(explicit);
+  for (const dir of clashVergeDataDirs(ctx)) paths.push(j(dir, 'config.yaml'));
+  for (const dir of clashPartyDataDirs(ctx)) paths.push(j(dir, 'config.yaml'));
+  const partyWork = j(clashPartyDataDir(ctx), 'work');
+  paths.push(j(partyWork, 'config.yaml'));
+  // diffWorkDir 模式下配置位于 work/<profileId>/config.yaml
+  try {
+    for (const entry of readdirSync(partyWork, { withFileTypes: true })) {
+      if (entry.isDirectory()) paths.push(j(partyWork, entry.name, 'config.yaml'));
+    }
+  } catch {
+    // work 目录不存在时忽略
+  }
+  return [...new Set(paths.filter((p) => existsSync(p)))];
+}
+
+/**
  * 候选的运行时配置文件路径。
- * Clash Party 正常使用 <dataDir>/work/config.yaml；
- * 进程的 -d 参数是最权威的来源（能覆盖 diffWorkDir 等设置）。
+ *
+ * 先放进程派生出来的（-f / -d 最权威，能覆盖 diffWorkDir 这类设置），再补数据目录。
+ * 只想拿「便宜的那部分」时用 staticRuntimeConfigPaths。
  */
 export function runtimeConfigPathCandidates(
   explicit?: string,
@@ -342,18 +412,8 @@ export function runtimeConfigPathCandidates(
     if (proc.configFile) paths.push(proc.configFile);
     if (proc.workDir) paths.push(joinLike(proc.workDir, 'config.yaml'));
   }
-  // Clash Verge 系列把合并后的运行时配置放在数据目录下的 config.yaml
-  for (const dir of clashVergeDataDirs(ctx)) paths.push(j(dir, 'config.yaml'));
-  for (const dir of clashPartyDataDirs(ctx)) paths.push(j(dir, 'config.yaml'));
-  const partyWork = j(clashPartyDataDir(ctx), 'work');
-  paths.push(j(partyWork, 'config.yaml'));
-  // diffWorkDir 模式下配置位于 work/<profileId>/config.yaml
-  try {
-    for (const entry of readdirSync(partyWork, { withFileTypes: true })) {
-      if (entry.isDirectory()) paths.push(j(partyWork, entry.name, 'config.yaml'));
-    }
-  } catch {
-    // work 目录不存在时忽略
+  for (const path of staticRuntimeConfigPaths(explicit, ctx)) {
+    if (!paths.includes(path)) paths.push(path);
   }
   return [...new Set(paths.filter((p) => existsSync(p)))];
 }
@@ -471,27 +531,30 @@ let windowsUserSidCache: string | undefined;
 
 export function windowsUserSid(): string | undefined {
   if (windowsUserSidCache !== undefined) return windowsUserSidCache || undefined;
-  const fromPowerShell = runPowerShell('[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value');
-  const candidates = [fromPowerShell];
+  const readSid = (text: string | undefined): string | undefined => {
+    const match = text ? /S-1-[0-9-]+/.exec(text.replace(/\s+/g, '')) : null;
+    return match?.[0];
+  };
+
+  // whoami 只要几十毫秒，PowerShell 启动要接近一秒：先 whoami，拿不到才上 PowerShell
+  let raw: string | undefined;
   try {
-    candidates.push(execFileSync('whoami.exe', ['/user'], {
+    raw = execFileSync('whoami.exe', ['/user'], {
       encoding: 'utf8',
       maxBuffer: 1024 * 1024,
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
-    }));
+    });
   } catch {
-    // whoami 不可用就算了
+    raw = undefined;
   }
-  for (const raw of candidates) {
-    const match = raw ? /S-1-[0-9-]+/.exec(raw.replace(/\s+/g, '')) : null;
-    if (match) {
-      windowsUserSidCache = match[0];
-      return windowsUserSidCache;
-    }
+  let sid = readSid(raw);
+  if (!sid) {
+    sid = readSid(runPowerShell('[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value'));
   }
-  windowsUserSidCache = '';
-  return undefined;
+
+  windowsUserSidCache = sid ?? '';
+  return sid;
 }
 
 export interface NodeDefinitionSource {

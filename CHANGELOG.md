@@ -8,6 +8,8 @@
   Clash Verge 管道（`\\.\pipe\verge-mihomo-sidecar-<release|dev>-<hash>`）、命名管道枚举、
   Clash Party 的 `\\.\pipe\MihomoParty\mihomo`、内核实际监听的端口，以及 Verge 的默认端口 9097。
 - 内核进程在服务模式下读不到命令行时改用镜像名识别；配置里的 `secret` 会自动补到其它候选上。
+- 发现流程分两层：先读客户端数据目录里的运行时配置（命中即用，Windows 上不再为此启动 WMI 全量扫描），
+  没命中才去枚举进程、监听端口与命名管道。
 - 认不到端点时的输出重做：标出每个候选的来源，直接给出发现的可用端点与可粘贴的 `--controller` 写法，
   `--verbose` 在发现失败时也会打印「afc 找了哪些地方」。
 

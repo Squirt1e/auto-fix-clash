@@ -8,6 +8,7 @@ import {
   normalizeWindowsPipePath,
   readRuntimeConfig,
   runtimeConfigPathCandidates,
+  staticRuntimeConfigPaths,
   windowsListenerPorts,
   windowsUserSid,
   type KernelProcess,
@@ -172,6 +173,74 @@ function discoverSocketFiles(ctx: PlatformContext): string[] {
 const keyOf = (e: ControllerEndpoint): string =>
   e.kind === 'tcp' ? `tcp:${e.host}:${e.port}` : `${e.kind}:${e.path}`;
 
+function makePush(candidates: ControllerEndpoint[]): (e: ControllerEndpoint | undefined) => void {
+  return (e) => {
+    if (!e) return;
+    if (candidates.some((c) => keyOf(c) === keyOf(e))) return;
+    candidates.push(e);
+  };
+}
+
+/**
+ * 读一份运行时配置，把里面的控制端点变成候选，并把「看到了什么」记进 facts。
+ *
+ * 客户端写的 external-controller-pipe（Clash Verge 的命名管道）与 secret 都在这里拿到，
+ * 这是最权威也最便宜的一条线索：不用启任何子进程。
+ */
+function collectConfigCandidates(
+  configPath: string,
+  options: DiscoverOptions,
+  facts: DiscoveryFacts,
+  push: (e: ControllerEndpoint | undefined) => void,
+): void {
+  try {
+    const summary = readRuntimeConfig(configPath);
+    const secret = options.secret ?? summary.secret;
+    facts.runtimeConfigs.push({
+      path: configPath,
+      ...(summary.externalController ? { controller: summary.externalController } : {}),
+      ...(summary.externalControllerPipe ? { pipe: summary.externalControllerPipe } : {}),
+      ...(summary.externalControllerUnix ? { unix: summary.externalControllerUnix } : {}),
+      hasSecret: Boolean(summary.secret),
+    });
+    // 记下配置里的 secret：Clash Verge 的 secret 是随机生成的，用户没法自己填，
+    // 因此把它当其它候选的兜底凭据（凭据不对时服务端一样是 401，不会有副作用）。
+    if (!facts.configSecret && summary.secret) facts.configSecret = summary.secret;
+
+    if (summary.externalControllerUnix) {
+      push({ kind: 'unix', path: summary.externalControllerUnix, source: `运行时配置 ${configPath}`, ...(secret ? { secret } : {}) });
+    }
+    if (summary.externalControllerPipe) {
+      push({ kind: 'pipe', path: summary.externalControllerPipe, source: `运行时配置 ${configPath}`, ...(secret ? { secret } : {}) });
+    }
+    if (summary.externalController) {
+      push(tcpFromPair(summary.externalController, `运行时配置 ${configPath}`, secret));
+    }
+  } catch {
+    // 配置读取失败不影响其它候选
+  }
+}
+
+/**
+ * 只做「便宜的那部分」发现：读已知数据目录里的运行时配置。
+ *
+ * 存在的意义是延迟：Windows 上枚举进程/端口/管道要启子进程（实测 CI 上十几秒），
+ * 而绝大多数用户的控制端点就写在自己的运行时配置里 —— 先试这一层，
+ * 命中就不必再掀整个系统。
+ */
+export function cheapPlan(
+  options: DiscoverOptions = {},
+  ctx: PlatformContext = currentPlatform(),
+): DiscoveryPlan {
+  const facts = emptyFacts();
+  const candidates: ControllerEndpoint[] = [];
+  const push = makePush(candidates);
+  for (const configPath of staticRuntimeConfigPaths(options.runtimeConfigPath, ctx)) {
+    collectConfigCandidates(configPath, options, facts, push);
+  }
+  return { candidates, facts };
+}
+
 /** 发现过程中看到的事实，用于诊断输出与报错提示。 */
 export interface DiscoveryFacts {
   runtimeConfigs: {
@@ -225,42 +294,13 @@ export function planDiscovery(
 
   const facts = emptyFacts();
   const candidates: ControllerEndpoint[] = [];
-  const push = (e: ControllerEndpoint | undefined): void => {
-    if (!e) return;
-    if (candidates.some((c) => keyOf(c) === keyOf(e))) return;
-    candidates.push(e);
-  };
+  const push = makePush(candidates);
 
   const processes = listKernelProcesses(ctx);
   facts.kernelProcesses = processes;
 
   for (const configPath of runtimeConfigPathCandidates(options.runtimeConfigPath, ctx)) {
-    try {
-      const summary = readRuntimeConfig(configPath);
-      const secret = options.secret ?? summary.secret;
-      facts.runtimeConfigs.push({
-        path: configPath,
-        ...(summary.externalController ? { controller: summary.externalController } : {}),
-        ...(summary.externalControllerPipe ? { pipe: summary.externalControllerPipe } : {}),
-        ...(summary.externalControllerUnix ? { unix: summary.externalControllerUnix } : {}),
-        hasSecret: Boolean(summary.secret),
-      });
-      // 记下配置里的 secret：Clash Verge 的 secret 是随机生成的，用户没法自己填，
-      // 因此把它当其它候选的兜底凭据（凭据不对时服务端一样是 401，不会有副作用）。
-      if (!facts.configSecret && summary.secret) facts.configSecret = summary.secret;
-
-      if (summary.externalControllerUnix) {
-        push({ kind: 'unix', path: summary.externalControllerUnix, source: `运行时配置 ${configPath}`, ...(secret ? { secret } : {}) });
-      }
-      if (summary.externalControllerPipe) {
-        push({ kind: 'pipe', path: summary.externalControllerPipe, source: `运行时配置 ${configPath}`, ...(secret ? { secret } : {}) });
-      }
-      if (summary.externalController) {
-        push(tcpFromPair(summary.externalController, `运行时配置 ${configPath}`, secret));
-      }
-    } catch {
-      // 配置读取失败不影响其它候选
-    }
+    collectConfigCandidates(configPath, options, facts, push);
   }
 
   const fallbackSecret = options.secret ?? facts.configSecret;
@@ -394,7 +434,10 @@ async function attemptEndpoints(
 
 /**
  * 发现并验证 mihomo 控制端点。
- * 逐个候选请求 /version，取第一个确认是 mihomo 的端点。
+ *
+ * 分两层：先试「读已知数据目录里的运行时配置」这一层（不启子进程，很快），
+ * 没命中才去枚举进程/端口/管道（Windows 上这层要启子进程，实测可能十几秒）。
+ * 两层都失败时才会给出诊断与「另外发现的可用端点」。
  */
 export async function discoverController(
   options: DiscoverOptions = {},
@@ -402,43 +445,62 @@ export async function discoverController(
 ): Promise<DiscoveredController> {
   const timeoutMs = options.timeoutMs ?? 3000;
   const budgetMs = options.budgetMs ?? 15000;
-  const plan = planDiscovery(options, ctx);
 
-  if (plan.candidates.length === 0) {
-    throw new ControllerDiscoveryError('no-candidates', [], hintText(plan.facts, ctx));
-  }
-
-  const result = await attemptEndpoints(plan.candidates, timeoutMs, budgetMs);
-  if (result.found) return result.found;
-
-  // 用户点名了端点，但参数可能不全（Clash Verge 的 secret 是随机生成的，手填不出来），
-  // 而且我们可能知道别的可用端点 —— 都在这里收尾，别让用户只能瞎猜。
-  let alternative: AlternativeEndpoint | undefined;
-  let hintFacts = plan.facts;
+  // 显式指定的端点就是唯一候选，直接用，不做任何自动发现（失败时的提示另算）
   if (options.explicit) {
+    const explicitEndpoint = parseEndpointString(options.explicit, options.secret);
+    const result = await attemptEndpoints([explicitEndpoint], timeoutMs, budgetMs);
+    if (result.found) return result.found;
+    // 这一层失败才跑自动发现：只为了告诉用户「其实还有能用的端点」以及给出排查提示
     const auto = planDiscovery({ ...options, explicit: undefined }, ctx);
-    // 提示里要讲的是「自动发现本来能找到什么」，而不是「因为你指定了所以没找」
-    hintFacts = auto.facts;
     if (result.sawUnauthorized && !options.secret && auto.facts.configSecret) {
       const retried = await tryEndpoint(parseEndpointString(options.explicit, auto.facts.configSecret), timeoutMs);
       if (retried) return retried;
     }
     const shortlist = auto.candidates.slice(0, 6);
-    if (shortlist.length > 0) {
-      const autoResult = await attemptEndpoints(shortlist, Math.min(timeoutMs, 1500), 5000);
-      if (autoResult.found) alternative = { endpoint: autoResult.found.endpoint, version: autoResult.found.version };
-    }
+    const alternative = shortlist.length > 0 ? await firstWorking(shortlist, timeoutMs) : undefined;
+    throw new ControllerDiscoveryError(
+      result.sawUnauthorized ? 'unauthorized' : 'unreachable',
+      result.attempts,
+      hintText(auto.facts, ctx),
+      alternative,
+    );
   }
 
-  const exhausted = result.budgetExhausted
+  const startedAt = Date.now();
+  const cheap = cheapPlan(options, ctx);
+  const first = await attemptEndpoints(cheap.candidates, timeoutMs, Math.min(budgetMs, 5000));
+  if (first.found) return first.found;
+
+  const plan = planDiscovery(options, ctx);
+  const tried = new Set(cheap.candidates.map(keyOf));
+  const rest = plan.candidates.filter((c) => !tried.has(keyOf(c)));
+  const second = await attemptEndpoints(rest, timeoutMs, Math.max(1000, budgetMs - (Date.now() - startedAt)));
+
+  const attempts = [...first.attempts, ...second.attempts];
+  if (plan.candidates.length === 0) {
+    throw new ControllerDiscoveryError('no-candidates', attempts, hintText(plan.facts, ctx));
+  }
+
+  const exhausted = first.budgetExhausted || second.budgetExhausted
     ? `（已用满 ${budgetMs}ms 预算，还有候选没试；可以用 --controller 直接指定，或先看一眼 --verbose 的报告）`
     : undefined;
   throw new ControllerDiscoveryError(
-    result.sawUnauthorized ? 'unauthorized' : 'unreachable',
-    result.attempts,
-    [exhausted, hintText(hintFacts, ctx)].filter((v): v is string => Boolean(v)).join('\n'),
-    alternative,
+    first.sawUnauthorized || second.sawUnauthorized ? 'unauthorized' : 'unreachable',
+    attempts,
+    [exhausted, hintText(plan.facts, ctx)].filter((v): v is string => Boolean(v)).join('\n'),
   );
+}
+
+/** 在一小组候选里找出第一个能用的（只用于失败路径上的提示）。 */
+async function firstWorking(
+  candidates: readonly ControllerEndpoint[],
+  timeoutMs: number,
+): Promise<AlternativeEndpoint | undefined> {
+  const result = await attemptEndpoints(candidates, Math.min(timeoutMs, 1500), 5000);
+  return result.found
+    ? { endpoint: result.found.endpoint, version: result.found.version }
+    : undefined;
 }
 
 /** 单独验证一个端点是不是 mihomo 控制端点。 */

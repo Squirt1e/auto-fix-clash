@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import {
   ControllerDiscoveryError,
   candidateEndpoints,
+  cheapPlan,
   discoverController,
   parseEndpointString,
   planDiscovery,
@@ -137,10 +138,13 @@ test('parseWindowsNetstatListeners 只取指定 PID 的监听端口（不看状�
 });
 
 test('isKernelImageName 按镜像名认内核（服务模式下命令行是空的）', () => {
-  for (const name of ['verge-mihomo.exe', 'verge-mihomo-alpha.exe', 'mihomo.exe', 'Mihomo.EXE', 'clash-meta.exe']) {
+  for (const name of [
+    'verge-mihomo.exe', 'verge-mihomo-alpha.exe', 'mihomo.exe', 'Mihomo.EXE',
+    'clash-meta.exe', 'clash_meta.exe', 'mihomo-core.exe',
+  ]) {
     assert.equal(isKernelImageName(name), true, name);
   }
-  for (const name of ['chrome.exe', 'mihomo-helper.exe', 'verge.exe', '']) {
+  for (const name of ['', 'chrome.exe', 'Clash Verge.exe', 'verge.exe', 'afc-probe-1234.exe']) {
     assert.equal(isKernelImageName(name), false, name);
   }
 });
@@ -242,6 +246,43 @@ test('运行时配置里的管道/端口/secret 会变成候选，且 secret 兜
     assert.equal(plan.facts.runtimeConfigs[0]?.path, path);
     assert.equal(plan.facts.runtimeConfigs[0]?.hasSecret, true);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('cheapPlan 只读运行时配置：不碰进程、管道与默认端口（那层很贵）', () => {
+  const { dir, path } = tempConfig('external-controller: 127.0.0.1:1234\nexternal-controller-pipe: \\\\.\\pipe\\verge-x\nsecret: s\n');
+  try {
+    const plan = cheapPlan({ runtimeConfigPath: path }, WINDOWS_CTX);
+    assert.deepEqual(
+      plan.candidates.map((c) => c.source),
+      [`运行时配置 ${path}`, `运行时配置 ${path}`],
+      '便宜层只该有配置里写明的端点',
+    );
+    assert.ok(!plan.candidates.some((c) => c.kind === 'tcp' && c.port === 9090), '默认端口属于后一层');
+    assert.ok(!plan.candidates.some((c) => c.source === '常见命名管道'), '写死的管道名属于后一层');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('便宜层命中就不再走重量级枚举（配置里的端点能答就直接用）', async () => {
+  const { server, port } = await startFakeController('s3cr3t');
+  const { dir, path } = tempConfig(`external-controller: 127.0.0.1:${port}\nsecret: s3cr3t\n`);
+  const closed = await freeClosedPort();
+  try {
+    const found = await discoverController(
+      {
+        runtimeConfigPath: path,
+        // 这个候选属于后一层：如果前面命中了，它不该被尝试（也就不会出现在 attempts 里）
+        extraCandidates: [{ kind: 'tcp', host: '127.0.0.1', port: closed, source: '后一层的候选' }],
+      },
+      WINDOWS_CTX,
+    );
+    assert.equal(found.version, 'v1.19.27');
+    assert.equal((found.endpoint as { port: number }).port, port);
+  } finally {
+    server.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });
