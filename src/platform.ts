@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { posix, win32 } from 'node:path';
 
@@ -124,10 +125,20 @@ export function clashPartyDataDirs(ctx: PlatformContext): string[] {
   return [j(xdgConfigHome(ctx), 'mihomo-party'), j(xdgDataHome(ctx), 'mihomo-party')];
 }
 
-/** Clash Verge (Rev) 的数据目录候选。 */
+/**
+ * Clash Verge (Rev) 的数据目录候选。
+ *
+ * 目录名就是 tauri 的 identifier：当前版本是 `io.github.clash-verge-rev.clash-verge-rev`，
+ * 但部分构建/旧版用过 `io.github.clash-verge-rev.clash-verge`，因此两个都要列上。
+ */
 export function clashVergeDataDirs(ctx: PlatformContext): string[] {
   const j = joinFor(ctx);
-  const ids = ['io.github.clash-verge-rev.clash-verge-rev', 'clash-verge', 'clash-verge-rev'];
+  const ids = [
+    'io.github.clash-verge-rev.clash-verge-rev',
+    'io.github.clash-verge-rev.clash-verge',
+    'clash-verge',
+    'clash-verge-rev',
+  ];
   if (ctx.platform === 'darwin') {
     return ids.map((id) => j(ctx.home, 'Library', 'Application Support', id));
   }
@@ -214,19 +225,52 @@ export function socketDirs(ctx: PlatformContext): string[] {
 }
 
 /**
- * 命名管道候选（Windows）。Clash Verge 用的是 `\\.\pipe\verge-mihomo`；
- * 其余几个是常见命名，找不到时可用 --controller pipe:<名字> 显式指定。
+ * 命名管道候选（Windows）。
+ *
+ * 名字来自各客户端自己的实现：
+ *   - Clash Party（mihomo-party）：`\\.\pipe\MihomoParty\mihomo`（新版，注意是「子目录」形式），
+ *     旧版用过 `\\.\pipe\mihomo-party`；
+ *   - Clash Verge Rev：旧版固定 `\\.\pipe\verge-mihomo`，
+ *     新版是按用户 SID 派生的名字（见 vergeSidecarPipeNames）。
+ *
+ * 这些都只是「猜」，真正的权威来源是运行时配置里的 external-controller-pipe
+ * 与管道枚举，找不到时可用 --controller 'pipe:<名字>' 显式指定。
  */
 export function pipeCandidates(ctx: PlatformContext): string[] {
-  const j = joinFor(ctx);
   if (!isWindows(ctx)) return [];
   return [
-    '\\\\.\\pipe\\verge-mihomo',
+    '\\\\.\\pipe\\MihomoParty\\mihomo',
     '\\\\.\\pipe\\mihomo-party',
+    '\\\\.\\pipe\\verge-mihomo',
     '\\\\.\\pipe\\mihomo',
     '\\\\.\\pipe\\clash-verge',
   ];
 }
+
+/**
+ * Clash Verge Rev 新版在 Windows 上的控制管道名。
+ *
+ * Verge 把 mihomo 的 REST API 挂在「按当前用户 SID 派生」的命名管道上：
+ *   `\\.\pipe\verge-mihomo-sidecar-{release|dev}-{owner_key}`
+ * 其中 owner_key = sha256(SID 字符串) 的十六进制（见 clash-verge-service-ipc 的 owner_key）。
+ * 我们无法猜出别人的 SID，但可以算自己的，因此这里能直接推出确切的管道名。
+ */
+export function vergeSidecarPipeNames(sid: string): string[] {
+  const key = createHash('sha256').update(sid.trim(), 'utf8').digest('hex');
+  return [
+    `\\\\.\\pipe\\verge-mihomo-sidecar-release-${key}`,
+    `\\\\.\\pipe\\verge-mihomo-sidecar-dev-${key}`,
+  ];
+}
+
+/**
+ * 默认的控制端点 TCP 端口。
+ *
+ * 9090 是 mihomo 的惯例默认值；9097 是 Clash Verge Rev 的默认值
+ * （见其 constants.rs 的 DEFAULT_EXTERNAL_CONTROLLER）。两者都要试，
+ * 否则 Verge 用户会看到「只试了 9090」这种没用的报错。
+ */
+export const DEFAULT_CONTROLLER_PORTS: readonly number[] = [9090, 9097];
 
 /** 系统计划任务机制的显示名（用于报告与错误提示）。 */
 export function scheduleBackendName(ctx: PlatformContext): string {

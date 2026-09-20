@@ -75,3 +75,14 @@ export function describeEndpoint(endpoint: ControllerEndpoint): string {
   if (endpoint.kind === 'tcp') return `tcp:${endpoint.host}:${endpoint.port}`;
   return `${endpoint.kind}:${endpoint.path}`;
 }
+
+/**
+ * 可以直接喂给 `--controller` 的写法。
+ *
+ * 与 describeEndpoint 的区别：TCP 端点不带 `tcp:` 前缀 —— 少一层引号/转义，
+ * 在 cmd 与 PowerShell 里都能原样粘贴（这些值里不会有空格或 shell 元字符）。
+ */
+export function endpointArg(endpoint: ControllerEndpoint): string {
+  if (endpoint.kind === 'tcp') return `${endpoint.host}:${endpoint.port}`;
+  return `${endpoint.kind}:${endpoint.path}`;
+}

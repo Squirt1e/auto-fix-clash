@@ -1,6 +1,13 @@
 import { findGroupName, loadConfig, requireTarget, type AfcConfig, type TargetConfig } from '../config.ts';
 import { isGroup, type MihomoClient, type ProxyInfo } from '../controller/client.ts';
-import { discoverController, type DiscoveredController } from '../controller/discovery.ts';
+import {
+  ControllerDiscoveryError,
+  describeDiscovery,
+  discoverController,
+  renderDiscoveryReport,
+  type DiscoverOptions,
+  type DiscoveredController,
+} from '../controller/discovery.ts';
 import { expandAutoTargets } from '../targets/auto.ts';
 import { optBoolean, optString, resolveTargets, type CommandContext } from './context.ts';
 
@@ -14,12 +21,22 @@ export async function openRuntime(context: CommandContext): Promise<Runtime> {
   const config = loadConfig(optString(context.values, 'config'));
   const explicit = optString(context.values, 'controller');
   const secret = optString(context.values, 'secret');
-  const controller = await discoverController({
+  const options: DiscoverOptions = {
     ...(explicit ? { explicit } : {}),
     ...(secret ? { secret } : {}),
     ...(config.probe.runtimeConfigPath ? { runtimeConfigPath: config.probe.runtimeConfigPath } : {}),
-  });
-  return { config, controller };
+  };
+  try {
+    const controller = await discoverController(options);
+    return { config, controller };
+  } catch (err) {
+    // 发现失败时 --verbose 必须也能给东西看：把「afc 找了哪些地方」打出来。
+    // （成功路径的诊断在各自的命令里打印。）
+    if (err instanceof ControllerDiscoveryError && optBoolean(context.values, 'verbose')) {
+      process.stderr.write(renderDiscoveryReport(describeDiscovery(options)) + '\n');
+    }
+    throw err;
+  }
 }
 
 export function targetsFor(runtime: Runtime, context: CommandContext): TargetConfig[] {

@@ -80,15 +80,21 @@ test('afc <命令> --help 打印该命令的用法', async () => {
   }
 });
 
-test('groups --help 给出 --controller 的三种端点写法', async () => {
+test('groups --help 给出 --controller 的几种端点写法', async () => {
   const { out } = await capture(['groups', '--help']);
   assert.match(out, /--controller unix:\/tmp\/mihomo-party-<uid>-<pid>\.sock/);
-  assert.match(out, /--controller 127\.0\.0\.1:9090 --secret/);
+  // Clash Verge Rev 的默认控制端口是 9097，不是 mihomo 惯例的 9090
+  assert.match(out, /--controller 127\.0\.0\.1:9097 --secret/);
   // Windows 管道示例在模板字符串里，反斜杠极容易被吃掉（\v 会变成控制字符），
   // 这里用 String.raw 断言运行时的真实字面量，锁住它不被改坏。
   assert.ok(
     out.includes(String.raw`--controller 'pipe:\\.\pipe\verge-mihomo'`),
     '管道示例应带正确的反斜杠',
+  );
+  // Clash Party 的管道是「子目录」形式（\\.\pipe\MihomoParty\mihomo），写错直接连不上
+  assert.ok(
+    out.includes(String.raw`--controller 'pipe:\\.\pipe\MihomoParty\mihomo'`),
+    'Clash Party 的管道示例应带正确的反斜杠与大小写',
   );
 });
 

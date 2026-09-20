@@ -126,13 +126,27 @@ afc -v                    # 版本号
 ## 不是 Clash Party / 有多个订阅
 
 - **其他客户端**（Clash Verge 等）：afc 会自动去找内核的控制端点和运行时配置，通常直接就能用。
-  认不到时先跑 `afc groups --verbose` 看它找到了什么，再用 `--controller` / `--secret` 手动指定：
+  它按这个顺序找：运行时配置里的 `external-controller` / `external-controller-pipe` →
+  内核进程命令行里的 `-ext-ctl*` → 内核进程实际监听的端口 → 命名管道（枚举 + 按当前用户 SID 推导 Verge 的管道名）→ 常见套接字/管道名 → 默认端口 9090、9097。
+
+  认不到时先跑 `afc groups --verbose`，它会打印「afc 到底找了哪些地方、每个候选源自哪里」；
+  也可以手动指定：
 
 ```bash
 afc groups --controller unix:/tmp/mihomo-party-<uid>-<pid>.sock   # Linux / macOS 的套接字
-afc groups --controller 'pipe:\\.\pipe\verge-mihomo'              # Windows 的命名管道
-afc groups --controller 127.0.0.1:9090 --secret <密钥>            # 开了 external-controller 时
+afc groups --controller 'pipe:\\.\pipe\MihomoParty\mihomo'        # Clash Party 的命名管道
+afc groups --controller 'pipe:\\.\pipe\verge-mihomo'              # Clash Verge 旧版的命名管道
+afc groups --controller 127.0.0.1:9097 --secret <密钥>            # 开了 external-controller 时（Verge 默认 9097）
 ```
+
+  Windows 上还有两个容易踩的点：
+
+  - **Clash Verge Rev 新版默认不开 TCP 端口**，控制端点挂在命名管道
+    `\\.\pipe\verge-mihomo-sidecar-<release|dev>-<当前用户 SID 的 sha256>` 上（名字和随机
+    `secret` 都写在 `%APPDATA%\io.github.clash-verge-rev.clash-verge-rev\config.yaml` 里）。
+    afc 会读那份配置，也会自己按你的 SID 算出管道名，一般不用手动指定。
+  - **Clash Party 的管道是「子目录」形式** `\\.\pipe\MihomoParty\mihomo`，不是 `\\.\pipe\mihomo-party`；
+    内核还可能以服务身份（SYSTEM）运行，此时读不到命令行，afc 会改用镜像名 + 内核实际监听的端口来找。
 
 - **多个订阅**：afc 跟着**当前生效的订阅**走 —— 切订阅是客户端的事，不用在 afc 里切。
   两个订阅的组名不一样也能自动认（例如一个叫 `GPT`、另一个叫 `🤖AI网站`）。
@@ -173,7 +187,8 @@ current node is healthy it changes nothing.
 
 - Cross-platform: macOS (launchd), Linux (systemd user timer, cron fallback), Windows (Task Scheduler)
 - Works with Clash Party, Clash Verge / Verge Rev, ClashX Meta or any mihomo kernel —
-  Unix socket, Windows named pipe (`\\.\pipe\verge-mihomo`) or external-controller with a secret
+  Unix socket, Windows named pipe (`\\.\pipe\MihomoParty\mihomo`,
+  `\\.\pipe\verge-mihomo-sidecar-*-<hash>`) or external-controller with a secret
 - Never rewrites your Clash config: it only switches the selected node through the control API
 - Install: `npm i -g auto-fix-clash && afc schedule install` (Node.js ≥ 20)
 

@@ -80,11 +80,16 @@ const GROUPS_HELP = `用法：afc groups [选项]
 选项：
   --json      机器可读输出
   --verbose   额外打印控制器来源与配置路径，并逐组说明未处理的原因
+              （认不到控制器时也会打印"afc 找了哪些地方"的诊断）
 
 认不到控制器时，用 --controller 手动指定：
   --controller unix:/tmp/mihomo-party-<uid>-<pid>.sock      （Linux / macOS 套接字）
-  --controller 'pipe:\\\\.\\pipe\\verge-mihomo'                 （Windows 命名管道）
-  --controller 127.0.0.1:9090 --secret <密钥>               （外部控制端口）
+  --controller 'pipe:\\\\.\\pipe\\MihomoParty\\mihomo'         （Clash Party 的命名管道）
+  --controller 'pipe:\\\\.\\pipe\\verge-mihomo'                （Clash Verge 旧版的命名管道）
+  --controller 127.0.0.1:9097 --secret <密钥>               （外部控制端口，Verge 默认 9097）
+
+Windows 上 Clash Verge Rev 新版的管道名带用户 SID 哈希，写在运行时配置里，
+afc 会自动读它；也可以先用 afc groups --verbose 看 afc 找到了什么。
 `;
 
 const DOCTOR_HELP = `用法：afc doctor [选项]

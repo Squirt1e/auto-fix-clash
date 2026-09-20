@@ -1,9 +1,27 @@
 import { readdirSync, type Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { MihomoClient, NotMihomoError, UnauthorizedError } from './client.ts';
-import { describeEndpoint, HttpError, type ControllerEndpoint } from './http.ts';
-import { listKernelProcesses, readRuntimeConfig, runtimeConfigPathCandidates } from '../paths.ts';
-import { currentPlatform, pipeCandidates, socketDirs, type PlatformContext } from '../platform.ts';
+import { describeEndpoint, endpointArg, HttpError, type ControllerEndpoint } from './http.ts';
+import {
+  kernelPidFilePids,
+  listKernelProcesses,
+  normalizeWindowsPipePath,
+  readRuntimeConfig,
+  runtimeConfigPathCandidates,
+  windowsListenerPorts,
+  windowsUserSid,
+  type KernelProcess,
+} from '../paths.ts';
+import {
+  currentPlatform,
+  DEFAULT_CONTROLLER_PORTS,
+  isWindows,
+  pipeCandidates,
+  socketDirs,
+  vergeSidecarPipeNames,
+  type PlatformContext,
+} from '../platform.ts';
+import { listWindowsPipes } from './pipe-scan.ts';
 
 export interface DiscoveredController {
   endpoint: ControllerEndpoint;
@@ -15,44 +33,79 @@ export type DiscoveryReason = 'no-candidates' | 'unauthorized' | 'unreachable';
 
 export interface EndpointAttempt {
   endpoint: string;
+  /** 候选是怎么来的（运行时配置 / 内核进程 / 管道枚举 …），排查时最关键的一列。 */
+  source: string;
   error: string;
+}
+
+/** 显式端点失败时，顺手发现的可用端点。 */
+export interface AlternativeEndpoint {
+  endpoint: ControllerEndpoint;
+  version: string;
 }
 
 export class ControllerDiscoveryError extends Error {
   readonly reason: DiscoveryReason;
   readonly attempts: EndpointAttempt[];
+  readonly hint?: string;
+  readonly alternative?: AlternativeEndpoint;
 
-  constructor(reason: DiscoveryReason, attempts: EndpointAttempt[]) {
-    super(ControllerDiscoveryError.buildMessage(reason, attempts));
+  constructor(
+    reason: DiscoveryReason,
+    attempts: EndpointAttempt[],
+    hint?: string,
+    alternative?: AlternativeEndpoint,
+  ) {
+    super(ControllerDiscoveryError.buildMessage(reason, attempts, hint, alternative));
     this.name = 'ControllerDiscoveryError';
     this.reason = reason;
     this.attempts = attempts;
+    if (hint) this.hint = hint;
+    if (alternative) this.alternative = alternative;
   }
 
-  private static buildMessage(reason: DiscoveryReason, attempts: EndpointAttempt[]): string {
+  private static buildMessage(
+    reason: DiscoveryReason,
+    attempts: EndpointAttempt[],
+    hint?: string,
+    alternative?: AlternativeEndpoint,
+  ): string {
     const detail = attempts.length > 0
-      ? '\n已尝试的端点：\n' + attempts.map((a) => `  - ${a.endpoint}：${a.error}`).join('\n')
+      ? '\n已尝试的端点：\n'
+        + attempts.map((a) => `  - ${a.endpoint}（来源：${a.source}）：${a.error}`).join('\n')
+      : '';
+    // 显式指定的端点是唯一候选（见 candidateEndpoints 的说明），但如果我们自己
+    // 恰好发现了能用的端点，就该直接告诉用户，而不是让他继续瞎猜。
+    const found = alternative
+      ? `\n\n另外发现这个端点可用：${describeEndpoint(alternative.endpoint)}（${alternative.endpoint.source}）\n`
+        + `去掉 --controller 直接跑一次即可（afc 会自己选到它，并读好对应的凭据）；\n`
+        + `确实要显式指定的话：--controller ${endpointArg(alternative.endpoint)}`
       : '';
     switch (reason) {
       case 'no-candidates':
         return '没有找到任何 mihomo 控制端点候选。\n'
           + '请确认 Clash Party / Clash Verge 正在运行（内核进程未运行时不提供服务），\n'
-          + '或用 --controller <unix:/path | host:port> 显式指定端点。';
+          + '或用 --controller <unix:/path | pipe:\\.\\pipe\\name | host:port> 显式指定端点。'
+          + (hint ? `\n\n${hint}` : '');
       case 'unauthorized':
         return '找到了控制端点，但认证失败。\n'
-          + '请在 afc.config.yaml 中配置 controller.secret，或用 --secret 指定密钥。' + detail;
+          + '请在 afc.config.yaml 中配置 controller.secret，或用 --secret 指定密钥。'
+          + detail + (hint ? `\n\n${hint}` : '') + found;
       case 'unreachable':
         return '找到了控制端点候选，但都无法访问。\n'
-          + '可能是内核正在重启、套接字路径已变化，或端点并非 mihomo 控制端口。' + detail;
+          + '可能是内核正在重启、套接字路径已变化，或端点并非 mihomo 控制端口。'
+          + detail + (hint ? `\n\n${hint}` : '') + found;
     }
   }
 }
 
 export interface DiscoverOptions {
-  /** 显式端点：`unix:/path/to.sock`、`http://127.0.0.1:9090` 或 `127.0.0.1:9090`。 */
+  /** 显式端点：`unix:/path/to.sock`、`pipe:\\.\pipe\name`、`http://127.0.0.1:9090` 或 `127.0.0.1:9090`。 */
   explicit?: string;
   secret?: string;
   timeoutMs?: number;
+  /** 发现阶段的总预算：候选很多时不至于让命令卡很久。 */
+  budgetMs?: number;
   /** 显式指定运行时配置路径（用于读取 external-controller 与 secret）。 */
   runtimeConfigPath?: string;
   /** 额外注入的候选（测试用）。 */
@@ -71,9 +124,10 @@ export function parseEndpointString(value: string, secret?: string): ControllerE
   if (value.startsWith('pipe:') || value.startsWith('\\\\.\\pipe\\')) {
     const path = value.startsWith('pipe:') ? value.slice('pipe:'.length) : value;
     if (!path) throw new Error(`无效的端点：${value}`);
-    return { kind: 'pipe', path, source, ...(secret ? { secret } : {}) };
+    return { kind: 'pipe', path: normalizeWindowsPipePath(path), source, ...(secret ? { secret } : {}) };
   }
-  const stripped = value.replace(/^https?:\/\//, '');
+  // 报错信息里打印的是 `tcp:host:port`，所以这里也接受这个前缀（让报错内容可直接复制粘贴）
+  const stripped = value.replace(/^https?:\/\//, '').replace(/^tcp:/, '');
   const [host, portText] = stripped.split(':');
   const port = Number(portText);
   if (!host || !Number.isInteger(port) || port <= 0) {
@@ -118,22 +172,58 @@ function discoverSocketFiles(ctx: PlatformContext): string[] {
 const keyOf = (e: ControllerEndpoint): string =>
   e.kind === 'tcp' ? `tcp:${e.host}:${e.port}` : `${e.kind}:${e.path}`;
 
+/** 发现过程中看到的事实，用于诊断输出与报错提示。 */
+export interface DiscoveryFacts {
+  runtimeConfigs: {
+    path: string;
+    controller?: string;
+    pipe?: string;
+    unix?: string;
+    hasSecret: boolean;
+  }[];
+  kernelProcesses: KernelProcess[];
+  kernelPorts: number[];
+  /** 系统里实际存在的、像 mihomo 的命名管道。 */
+  pipes: string[];
+  /** 按当前用户 SID 推导出的 Verge 管道。 */
+  vergePipes: string[];
+  defaults: readonly number[];
+  /** 从运行时配置里读到的 secret（用于给其它候选兜底，以及认证失败后的重试）。 */
+  configSecret?: string;
+}
+
+export interface DiscoveryPlan {
+  candidates: ControllerEndpoint[];
+  facts: DiscoveryFacts;
+}
+
 /**
  * 按可靠性排序枚举候选端点：
  *   1. 显式指定
- *   2. 运行时配置中的 external-controller（最权威：内核实际在用的配置）
+ *   2. 运行时配置中的 external-controller / external-controller-pipe（最权威：内核实际在用的配置）
  *   3. 运行中内核进程的命令行参数
- *   4. 常见目录下名字像 mihomo/clash 的套接字
- *   5. 默认 TCP 端口
+ *   4. 内核进程监听的 TCP 端口（端口被改过、或读不到命令行时依然有效）
+ *   5. 按当前用户 SID 推导出的 Clash Verge 命名管道
+ *   6. 系统里真实存在、名字像 mihomo 的命名管道
+ *   7. 常见目录下名字像 mihomo/clash 的套接字（POSIX）
+ *   8. 常见命名管道名（Windows）
+ *   9. 默认 TCP 端口
  */
-export function candidateEndpoints(
+export function planDiscovery(
   options: DiscoverOptions = {},
   ctx: PlatformContext = currentPlatform(),
-): ControllerEndpoint[] {
+): DiscoveryPlan {
   // 显式指定的端点就是唯一候选：用户既然点名了端点，失败时应该明确报错，
   // 而不是悄悄回退到别的端点（否则排查时会被误导）。
-  if (options.explicit) return [parseEndpointString(options.explicit, options.secret)];
+  // 不过失败信息里会把「我们自己发现的可用端点」一并给出，避免用户瞎猜。
+  if (options.explicit) {
+    return {
+      candidates: [parseEndpointString(options.explicit, options.secret)],
+      facts: emptyFacts(),
+    };
+  }
 
+  const facts = emptyFacts();
   const candidates: ControllerEndpoint[] = [];
   const push = (e: ControllerEndpoint | undefined): void => {
     if (!e) return;
@@ -142,61 +232,164 @@ export function candidateEndpoints(
   };
 
   const processes = listKernelProcesses(ctx);
+  facts.kernelProcesses = processes;
+
   for (const configPath of runtimeConfigPathCandidates(options.runtimeConfigPath, ctx)) {
     try {
       const summary = readRuntimeConfig(configPath);
       const secret = options.secret ?? summary.secret;
+      facts.runtimeConfigs.push({
+        path: configPath,
+        ...(summary.externalController ? { controller: summary.externalController } : {}),
+        ...(summary.externalControllerPipe ? { pipe: summary.externalControllerPipe } : {}),
+        ...(summary.externalControllerUnix ? { unix: summary.externalControllerUnix } : {}),
+        hasSecret: Boolean(summary.secret),
+      });
+      // 记下配置里的 secret：Clash Verge 的 secret 是随机生成的，用户没法自己填，
+      // 因此把它当其它候选的兜底凭据（凭据不对时服务端一样是 401，不会有副作用）。
+      if (!facts.configSecret && summary.secret) facts.configSecret = summary.secret;
+
       if (summary.externalControllerUnix) {
         push({ kind: 'unix', path: summary.externalControllerUnix, source: `运行时配置 ${configPath}`, ...(secret ? { secret } : {}) });
       }
+      if (summary.externalControllerPipe) {
+        push({ kind: 'pipe', path: summary.externalControllerPipe, source: `运行时配置 ${configPath}`, ...(secret ? { secret } : {}) });
+      }
       if (summary.externalController) {
-        const hostPort = summary.externalController.replace(/^https?:\/\//, '');
-        const [host, portText] = hostPort.split(':');
-        const port = Number(portText);
-        if (host && Number.isInteger(port) && port > 0) {
-          const normalized = host === '0.0.0.0' || host === '' ? '127.0.0.1' : host;
-          push({ kind: 'tcp', host: normalized, port, source: `运行时配置 ${configPath}`, ...(secret ? { secret } : {}) });
-        }
+        push(tcpFromPair(summary.externalController, `运行时配置 ${configPath}`, secret));
       }
     } catch {
       // 配置读取失败不影响其它候选
     }
   }
 
+  const fallbackSecret = options.secret ?? facts.configSecret;
   for (const proc of processes) {
-    const secret = options.secret;
     if (proc.unixSocket) {
-      push({ kind: 'unix', path: proc.unixSocket, source: `内核进程 ${proc.pid} 的 -ext-ctl-unix`, ...(secret ? { secret } : {}) });
+      push({ kind: 'unix', path: proc.unixSocket, source: `内核进程 ${proc.pid} 的 -ext-ctl-unix`, ...(fallbackSecret ? { secret: fallbackSecret } : {}) });
     }
     if (proc.pipePath) {
-      const pipePath = proc.pipePath.startsWith('\\\\.\\pipe\\')
-        ? proc.pipePath
-        : `\\\\.\\pipe\\${proc.pipePath}`;
-      push({ kind: 'pipe', path: pipePath, source: `内核进程 ${proc.pid} 的 -ext-ctl-pipe`, ...(secret ? { secret } : {}) });
+      push({
+        kind: 'pipe',
+        path: normalizeWindowsPipePath(proc.pipePath),
+        source: `内核进程 ${proc.pid} 的 -ext-ctl-pipe`,
+        ...(fallbackSecret ? { secret: fallbackSecret } : {}),
+      });
     }
     if (proc.tcpController) {
-      const [host, portText] = proc.tcpController.split(':');
-      const port = Number(portText);
-      if (host && Number.isInteger(port) && port > 0) {
-        const normalized = host === '0.0.0.0' || host === '' ? '127.0.0.1' : host;
-        push({ kind: 'tcp', host: normalized, port, source: `内核进程 ${proc.pid} 的 -ext-ctl`, ...(secret ? { secret } : {}) });
+      push(tcpFromPair(proc.tcpController, `内核进程 ${proc.pid} 的 -ext-ctl`, fallbackSecret));
+    }
+  }
+
+  if (isWindows(ctx)) {
+    // 内核监听在哪些端口是查得到的事实，比猜默认端口可靠（Verge 的端口可以自定义/随机）。
+    const pids = [...new Set([...processes.map((p) => p.pid), ...kernelPidFilePids(ctx)])];
+    facts.kernelPorts = windowsListenerPorts(pids);
+    for (const port of facts.kernelPorts) {
+      push({ kind: 'tcp', host: '127.0.0.1', port, source: `内核进程监听端口 ${port}`, ...(fallbackSecret ? { secret: fallbackSecret } : {}) });
+    }
+
+    // Clash Verge Rev 新版的管道名 = \\.\pipe\verge-mihomo-sidecar-<flavor>-<sha256(用户 SID)>，
+    // 无法猜别人的，但可以算自己的。
+    const sid = windowsUserSid();
+    if (sid) {
+      facts.vergePipes = vergeSidecarPipeNames(sid);
+      for (const path of facts.vergePipes) {
+        push({ kind: 'pipe', path, source: 'Clash Verge 命名管道（按当前用户 SID 推导）', ...(fallbackSecret ? { secret: fallbackSecret } : {}) });
       }
+    }
+
+    // 真实存在的管道名单（Clash Party 的 \\.\pipe\MihomoParty\mihomo 就在里面）
+    facts.pipes = listWindowsPipes(ctx);
+    for (const path of facts.pipes) {
+      push({ kind: 'pipe', path, source: '命名管道枚举', ...(fallbackSecret ? { secret: fallbackSecret } : {}) });
     }
   }
 
   for (const path of discoverSocketFiles(ctx)) {
-    push({ kind: 'unix', path, source: '套接字目录扫描', ...(options.secret ? { secret: options.secret } : {}) });
-  }
-  // Windows：枚举不到命名管道，只能用已知名字试探
-  for (const path of pipeCandidates(ctx)) {
-    push({ kind: 'pipe', path, source: '常见命名管道', ...(options.secret ? { secret: options.secret } : {}) });
+    push({ kind: 'unix', path, source: '套接字目录扫描', ...(fallbackSecret ? { secret: fallbackSecret } : {}) });
   }
 
-  push({ kind: 'tcp', host: '127.0.0.1', port: 9090, source: '默认 TCP 端口', ...(options.secret ? { secret: options.secret } : {}) });
+  for (const path of pipeCandidates(ctx)) {
+    push({ kind: 'pipe', path, source: '常见命名管道', ...(fallbackSecret ? { secret: fallbackSecret } : {}) });
+  }
+
+  facts.defaults = DEFAULT_CONTROLLER_PORTS;
+  for (const port of DEFAULT_CONTROLLER_PORTS) {
+    push({ kind: 'tcp', host: '127.0.0.1', port, source: `默认 TCP 端口 ${port}`, ...(fallbackSecret ? { secret: fallbackSecret } : {}) });
+  }
 
   for (const extra of options.extraCandidates ?? []) push(extra);
 
-  return candidates;
+  return { candidates, facts };
+}
+
+/** 只要候选列表（测试与调试用）。 */
+export function candidateEndpoints(
+  options: DiscoverOptions = {},
+  ctx: PlatformContext = currentPlatform(),
+): ControllerEndpoint[] {
+  return planDiscovery(options, ctx).candidates;
+}
+
+function emptyFacts(): DiscoveryFacts {
+  return {
+    runtimeConfigs: [],
+    kernelProcesses: [],
+    kernelPorts: [],
+    pipes: [],
+    vergePipes: [],
+    defaults: DEFAULT_CONTROLLER_PORTS,
+  };
+}
+
+/** `host:port`（或 `http://host:port`）→ tcp 候选；非法值返回 undefined。 */
+function tcpFromPair(value: string, source: string, secret?: string): ControllerEndpoint | undefined {
+  const hostPort = value.replace(/^https?:\/\//, '');
+  const [host, portText] = hostPort.split(':');
+  const port = Number(portText);
+  if (!host || !Number.isInteger(port) || port <= 0) return undefined;
+  const normalized = host === '0.0.0.0' || host === '' ? '127.0.0.1' : host;
+  return { kind: 'tcp', host: normalized, port, source, ...(secret ? { secret } : {}) };
+}
+
+interface AttemptResult {
+  found?: DiscoveredController;
+  attempts: EndpointAttempt[];
+  sawUnauthorized: boolean;
+  budgetExhausted: boolean;
+}
+
+/** 依次尝试候选端点，返回第一个确认是 mihomo 的端点。 */
+async function attemptEndpoints(
+  candidates: readonly ControllerEndpoint[],
+  timeoutMs: number,
+  budgetMs: number,
+): Promise<AttemptResult> {
+  const attempts: EndpointAttempt[] = [];
+  const deadline = Date.now() + budgetMs;
+  let sawUnauthorized = false;
+  let budgetExhausted = false;
+
+  for (const endpoint of candidates) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      budgetExhausted = true;
+      break;
+    }
+    const client = new MihomoClient(endpoint, timeoutMs);
+    try {
+      const info = await client.version(Math.min(timeoutMs, remaining));
+      return { found: { endpoint, version: info.version, client }, attempts, sawUnauthorized, budgetExhausted: false };
+    } catch (err) {
+      if (err instanceof UnauthorizedError) sawUnauthorized = true;
+      const message = err instanceof NotMihomoError ? '不是 mihomo 控制端点' : (err as Error).message;
+      attempts.push({ endpoint: describeEndpoint(endpoint), source: endpoint.source, error: message });
+      if (err instanceof HttpError && err.status === 401) sawUnauthorized = true;
+    }
+  }
+
+  return { attempts, sawUnauthorized, budgetExhausted };
 }
 
 /**
@@ -208,24 +401,143 @@ export async function discoverController(
   ctx: PlatformContext = currentPlatform(),
 ): Promise<DiscoveredController> {
   const timeoutMs = options.timeoutMs ?? 3000;
-  const candidates = candidateEndpoints(options, ctx);
-  if (candidates.length === 0) throw new ControllerDiscoveryError('no-candidates', []);
+  const budgetMs = options.budgetMs ?? 15000;
+  const plan = planDiscovery(options, ctx);
 
-  const attempts: EndpointAttempt[] = [];
-  let sawUnauthorized = false;
+  if (plan.candidates.length === 0) {
+    throw new ControllerDiscoveryError('no-candidates', [], hintText(plan.facts, ctx));
+  }
 
-  for (const endpoint of candidates) {
-    const client = new MihomoClient(endpoint, timeoutMs);
-    try {
-      const info = await client.version(timeoutMs);
-      return { endpoint, version: info.version, client: new MihomoClient(endpoint) };
-    } catch (err) {
-      if (err instanceof UnauthorizedError) sawUnauthorized = true;
-      const message = err instanceof NotMihomoError ? '不是 mihomo 控制端点' : (err as Error).message;
-      attempts.push({ endpoint: describeEndpoint(endpoint), error: message });
-      if (err instanceof HttpError && err.status === 401) sawUnauthorized = true;
+  const result = await attemptEndpoints(plan.candidates, timeoutMs, budgetMs);
+  if (result.found) return result.found;
+
+  // 用户点名了端点，但参数可能不全（Clash Verge 的 secret 是随机生成的，手填不出来），
+  // 而且我们可能知道别的可用端点 —— 都在这里收尾，别让用户只能瞎猜。
+  let alternative: AlternativeEndpoint | undefined;
+  let hintFacts = plan.facts;
+  if (options.explicit) {
+    const auto = planDiscovery({ ...options, explicit: undefined }, ctx);
+    // 提示里要讲的是「自动发现本来能找到什么」，而不是「因为你指定了所以没找」
+    hintFacts = auto.facts;
+    if (result.sawUnauthorized && !options.secret && auto.facts.configSecret) {
+      const retried = await tryEndpoint(parseEndpointString(options.explicit, auto.facts.configSecret), timeoutMs);
+      if (retried) return retried;
+    }
+    const shortlist = auto.candidates.slice(0, 6);
+    if (shortlist.length > 0) {
+      const autoResult = await attemptEndpoints(shortlist, Math.min(timeoutMs, 1500), 5000);
+      if (autoResult.found) alternative = { endpoint: autoResult.found.endpoint, version: autoResult.found.version };
     }
   }
 
-  throw new ControllerDiscoveryError(sawUnauthorized ? 'unauthorized' : 'unreachable', attempts);
+  const exhausted = result.budgetExhausted
+    ? `（已用满 ${budgetMs}ms 预算，还有候选没试；可以用 --controller 直接指定，或先看一眼 --verbose 的报告）`
+    : undefined;
+  throw new ControllerDiscoveryError(
+    result.sawUnauthorized ? 'unauthorized' : 'unreachable',
+    result.attempts,
+    [exhausted, hintText(hintFacts, ctx)].filter((v): v is string => Boolean(v)).join('\n'),
+    alternative,
+  );
+}
+
+/** 单独验证一个端点是不是 mihomo 控制端点。 */
+async function tryEndpoint(endpoint: ControllerEndpoint, timeoutMs: number): Promise<DiscoveredController | undefined> {
+  const client = new MihomoClient(endpoint, timeoutMs);
+  try {
+    const info = await client.version(timeoutMs);
+    return { endpoint, version: info.version, client: new MihomoClient(endpoint) };
+  } catch {
+    return undefined;
+  }
+}
+
+/** 平台相关的排查提示。 */
+function hintText(facts: DiscoveryFacts, ctx: PlatformContext): string {
+  const lines: string[] = [];
+  if (isWindows(ctx)) {
+    lines.push(
+      'Windows 上这两个客户端默认都不监听 9090：',
+      '  · Clash Verge Rev：控制端点在命名管道 \\\\.\\pipe\\verge-mihomo-sidecar-<release|dev>-<hash>，',
+      '    名字与 secret 都写在运行时配置的 external-controller-pipe / secret 里；',
+      '  · Clash Party：控制端点是 \\\\.\\pipe\\MihomoParty\\mihomo，由内核的 -ext-ctl-pipe 指定。',
+    );
+    if (facts.runtimeConfigs.length === 0) {
+      lines.push('这次没有读到任何运行时配置：确认客户端的数据目录（%APPDATA%\\<客户端 id>\\config.yaml）存在，');
+      lines.push('或直接指定：--controller \'pipe:\\\\.\\pipe\\MihomoParty\\mihomo\' / --controller 127.0.0.1:9097');
+    } else if (facts.pipes.length === 0) {
+      lines.push('这次没有枚举到像 mihomo 的命名管道：内核可能没在运行（客户端退出后管道会消失）。');
+    }
+  }
+  lines.push('用 afc groups --verbose 可以看到「afc 到底找了哪些地方、每个候选源自哪里」。');
+  return lines.join('\n');
+}
+
+export interface DiscoveryReport {
+  /** 用户用 --controller 指定的端点（此时 facts 给出的是「自动发现会找到什么」）。 */
+  explicit?: string;
+  facts: DiscoveryFacts;
+  candidates: ControllerEndpoint[];
+}
+
+/** 供 `--verbose` 使用的诊断报告：afc 到底找了哪些地方。 */
+export function describeDiscovery(
+  options: DiscoverOptions = {},
+  ctx: PlatformContext = currentPlatform(),
+): DiscoveryReport {
+  // 显式指定端点时 discovery 只会用那一个候选，但诊断的意义恰恰是
+  // 「如果不用 --controller，afc 本来能找到什么」，所以这里照样跑一遍自动发现。
+  if (options.explicit) {
+    const auto = planDiscovery({ ...options, explicit: undefined }, ctx);
+    return { explicit: options.explicit, facts: auto.facts, candidates: auto.candidates };
+  }
+  const plan = planDiscovery(options, ctx);
+  return { facts: plan.facts, candidates: plan.candidates };
+}
+
+export function renderDiscoveryReport(report: DiscoveryReport): string {
+  const { facts, candidates } = report;
+  const lines: string[] = ['端点发现过程：'];
+  if (report.explicit) {
+    lines.push(`  手动指定了端点：${report.explicit}（自动发现被跳过，下面是自动发现的结果）`);
+  }
+
+  if (facts.runtimeConfigs.length === 0) {
+    lines.push('  运行时配置：没有找到（客户端没跑过，或数据目录不在已知位置）');
+  } else {
+    for (const config of facts.runtimeConfigs) {
+      const parts = [
+        config.controller ? `external-controller: ${config.controller}` : undefined,
+        config.pipe ? `external-controller-pipe: ${config.pipe}` : undefined,
+        config.unix ? `external-controller-unix: ${config.unix}` : undefined,
+        config.hasSecret ? '含 secret' : '无 secret',
+      ].filter((v): v is string => Boolean(v));
+      lines.push(`  运行时配置：${config.path}（${parts.join('，')}）`);
+    }
+  }
+
+  if (facts.kernelProcesses.length === 0) {
+    lines.push('  内核进程：没有发现（内核未运行，或读不到进程列表）');
+  } else {
+    for (const proc of facts.kernelProcesses) {
+      const args = [
+        proc.workDir ? `-d ${proc.workDir}` : undefined,
+        proc.configFile ? `-f ${proc.configFile}` : undefined,
+        proc.tcpController ? `-ext-ctl ${proc.tcpController}` : undefined,
+        proc.pipePath ? `-ext-ctl-pipe ${proc.pipePath}` : undefined,
+        proc.unixSocket ? `-ext-ctl-unix ${proc.unixSocket}` : undefined,
+      ].filter((v): v is string => Boolean(v));
+      // 镜像名只有在 Windows 上才拿得到（POSIX 只有命令行，太长没必要重复打印）
+      const shown = proc.name && proc.name !== '' ? proc.name : 'mihomo 内核';
+      lines.push(`  内核进程：${shown}（pid ${proc.pid}${args.length > 0 ? `，${args.join(' ')}` : ''}）`);
+    }
+  }
+
+  if (facts.kernelPorts.length > 0) lines.push(`  内核监听端口：${facts.kernelPorts.join('、')}`);
+  if (facts.vergePipes.length > 0) lines.push(`  按 SID 推导的 Verge 管道：${facts.vergePipes[0]}`);
+  if (facts.pipes.length > 0) lines.push(`  枚举到的命名管道：${facts.pipes.join('、')}`);
+
+  lines.push(`  候选端点（${candidates.length} 个，按尝试顺序）：`);
+  for (const c of candidates) lines.push(`    - ${describeEndpoint(c)}（${c.source}）`);
+  return lines.join('\n') + '\n';
 }
