@@ -404,7 +404,9 @@ test('在 WSL 里跑时，报错会说明「Clash 在宿主机上，不在同一
         const message = (err as Error).message;
         assert.match(message, /WSL/);
         assert.match(message, /网络命名空间/);
-        assert.match(message, /宿主机的控制端口/);
+        // 要给出能直接照做的两条路：镜像网络模式 / 到 Windows 侧运行
+        assert.match(message, /networkingMode=mirrored/);
+        assert.match(message, /\/mnt\/c/);
         // WSL 的提示要压过通用的 POSIX 提示（后者会让人以为只是 Clash 没跑）
         assert.doesNotMatch(message, /Clash Party 用 Unix 套接字/);
         return true;

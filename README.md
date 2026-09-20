@@ -180,15 +180,23 @@ controller:
 正常，那就是本项目的定时任务（它执行的是 `node`，macOS 按代码签名主体归类）。
 查看或关闭：系统设置 → 通用 → 登录项与扩展；`afc schedule status --verbose` 可核对任务文件路径。
 
-**在 WSL / 容器里跑 afc？**
-不行，得在**跑 Clash 的那台机器上**跑。WSL2 的 `127.0.0.1` 是它自己的回环，连不到 Windows 宿主机的
-控制端口（宿主机的 `127.0.0.1:9097` 也不对外监听），命名管道更是完全用不了；而且 afc 探测节点还要用
-mihomo 内核二进制，那个也在 Windows 上。症状很像「Clash 没在运行」，实际是跑错地方了 ——
-1.1.4 起 afc 会直接这么提示。在 Windows 的 PowerShell / cmd 里装一次即可：`npm i -g auto-fix-clash`。
+**在 WSL（bash）里跑 afc？**
+1.2.0 起支持：afc 会从 `/mnt/c` 读 Windows 客户端的运行时配置（外部控制端口与密钥），并把候选主机名
+换成 `127.0.0.1`（镜像网络模式）+ 宿主机地址（NAT 模式的网关 / DNS）。**剩下只差网络这一层**：
 
-确实要在 WSL 里用的话，需要三件事齐全：Verge 打开「局域网连接」、把「外部控制器监听地址」改成
-`0.0.0.0:9097`、放行防火墙；再用 `controller.endpoint` 指向宿主机 IP（取 `/etc/resolv.conf` 的
-nameserver）；并用 `probe.kernelPath` 指一个 WSL 里可执行的 Linux 版 mihomo。
+- 最省事：在 Windows 的 `%USERPROFILE%\.wslconfig` 里加
+  ```ini
+  [wsl2]
+  networkingMode=mirrored
+  ```
+  然后 `wsl --shutdown` 重启，`127.0.0.1:9097` 在 WSL 里就通了。
+- 或者 NAT 模式：Verge 打开「局域网连接」、把「外部控制器监听地址」改成 `0.0.0.0:9097`、放行防火墙
+  （只绑 `127.0.0.1` 的端口从 WSL 是连不上的）。
+- 另外 `afc fix` / `afc doctor` 要起临时内核实例，需要 Linux 版 mihomo：用 `probe.kernelPath` 指一个
+  放进 WSL 的可执行文件。`afc groups` / `afc add` 这类控制面操作不需要内核。
+
+嫌麻烦就直接在 Windows 的 PowerShell / cmd 里跑（`npm i -g auto-fix-clash`）：那边 afc 用命名管道，
+什么都不用配。
 
 **会改我的 Clash 配置吗？**
 不会。afc 只写这几处：系统调度器的任务定义（macOS 的 `~/Library/LaunchAgents/`、

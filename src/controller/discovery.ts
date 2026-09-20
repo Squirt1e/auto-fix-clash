@@ -24,6 +24,7 @@ import {
   type PlatformContext,
 } from '../platform.ts';
 import { scanWindowsPipes } from './pipe-scan.ts';
+import { wslBridge, wslClientConfigPaths, type WslBridge } from '../wsl.ts';
 
 export interface DiscoveredController {
   endpoint: ControllerEndpoint;
@@ -197,6 +198,10 @@ function collectConfigCandidates(
   options: DiscoverOptions,
   facts: DiscoveryFacts,
   push: (e: ControllerEndpoint | undefined) => void,
+  /** WSL 用：把配置里的 127.0.0.1 再按宿主机地址生成一份候选。 */
+  hostRewrites: readonly string[] = [],
+  /** WSL 用：Windows 配置里的 unix/pipe 端点在这里毫无意义，不要生成。 */
+  skipLocalIpc = false,
 ): void {
   try {
     const summary = readRuntimeConfig(configPath);
@@ -212,14 +217,17 @@ function collectConfigCandidates(
     // 因此把它当其它候选的兜底凭据（凭据不对时服务端一样是 401，不会有副作用）。
     if (!facts.configSecret && summary.secret) facts.configSecret = summary.secret;
 
-    if (summary.externalControllerUnix) {
+    if (!skipLocalIpc && summary.externalControllerUnix) {
       push({ kind: 'unix', path: summary.externalControllerUnix, source: `运行时配置 ${configPath}`, ...(secret ? { secret } : {}) });
     }
-    if (summary.externalControllerPipe) {
+    if (!skipLocalIpc && summary.externalControllerPipe) {
       push({ kind: 'pipe', path: summary.externalControllerPipe, source: `运行时配置 ${configPath}`, ...(secret ? { secret } : {}) });
     }
     if (summary.externalController) {
       push(tcpFromPair(summary.externalController, `运行时配置 ${configPath}`, secret));
+      for (const host of hostRewrites) {
+        push(tcpFromPair(replaceHost(summary.externalController, host), `运行时配置 ${configPath}（WSL 宿主机 ${host}）`, secret));
+      }
     }
   } catch {
     // 配置读取失败不影响其它候选
@@ -246,6 +254,7 @@ export function cheapPlan(
   for (const configPath of configPaths) {
     collectConfigCandidates(configPath, options, facts, push);
   }
+  if (detectWsl()) collectWslCandidates(options, facts, push);
   for (const port of configuredPorts(options)) {
     push({
       kind: 'tcp',
@@ -291,6 +300,10 @@ export interface DiscoveryFacts {
   checkedConfigPaths: string[];
   /** 本次发现是否按 Windows 走（决定报告里要不要讲管道枚举）。 */
   windows: boolean;
+  /** WSL：读到的 Windows 用户目录、宿主机地址与客户端配置。 */
+  wslProfiles: string[];
+  wslHostAddresses: string[];
+  wslConfigPaths: string[];
   defaults: readonly number[];
   /** 从运行时配置里读到的 secret（用于给其它候选兜底，以及认证失败后的重试）。 */
   configSecret?: string;
@@ -429,8 +442,53 @@ function emptyFacts(): DiscoveryFacts {
     vergePipes: [],
     checkedConfigPaths: [],
     windows: false,
+    wslProfiles: [],
+    wslHostAddresses: [],
+    wslConfigPaths: [],
     defaults: DEFAULT_CONTROLLER_PORTS,
   };
+}
+
+/** 把 `host:port` 里的 host 换掉（WSL 里 127.0.0.1 指的是 WSL 自己）。 */
+function replaceHost(value: string, host: string): string {
+  const hostPort = value.replace(/^https?:\/\//, '');
+  const port = hostPort.slice(hostPort.lastIndexOf(':') + 1);
+  return `${host}:${port}`;
+}
+
+/**
+ * WSL 专属候选：从 Windows 宿主机那份配置里读出控制端点，再把主机名换成能通的地址。
+ *
+ * 为什么需要：WSL2 的 127.0.0.1 是它自己的回环，而宿主机的控制端口默认只绑 127.0.0.1，
+ * 所以「读得到配置」不等于「连得上」；镜像网络模式（networkingMode=mirrored）下
+ * 127.0.0.1 才是通的，NAT 模式则要宿主机地址 + 客户端允许局域网。两种都试。
+ */
+export function collectWslCandidates(
+  options: DiscoverOptions,
+  facts: DiscoveryFacts,
+  push: (e: ControllerEndpoint | undefined) => void,
+  bridge: WslBridge = wslBridge(),
+  configPaths: readonly string[] = wslClientConfigPaths(bridge),
+): void {
+  facts.wslHostAddresses = [...bridge.hostAddresses];
+  facts.wslProfiles = bridge.profiles.map((p) => `${p.mountRoot}/Users/${p.username}`);
+  for (const configPath of configPaths) {
+    facts.wslConfigPaths.push(configPath);
+    collectConfigCandidates(configPath, options, facts, push, bridge.hostAddresses, true);
+  }
+  // 宿主机上的默认端口也试一遍（配置读不到时还有这条路）
+  const secret = options.secret ?? facts.configSecret;
+  for (const host of bridge.hostAddresses) {
+    for (const port of DEFAULT_CONTROLLER_PORTS) {
+      push({
+        kind: 'tcp',
+        host,
+        port,
+        source: `WSL 宿主机的默认端口 ${port}`,
+        ...(secret ? { secret } : {}),
+      });
+    }
+  }
 }
 
 /** `host:port`（或 `http://host:port`）→ tcp 候选；非法值返回 undefined。 */
@@ -618,14 +676,15 @@ function hintText(facts: DiscoveryFacts, ctx: PlatformContext, attempts: readonl
   } else if (detectWsl()) {
     // 在 WSL 里跑 afc、Clash 装在 Windows 宿主机上：这是"看着像 Clash 没在跑"的典型假象
     lines.push(
-      'afc 现在跑在 WSL 里，而 Clash 客户端通常装在 Windows 宿主机上 —— 两者不在同一个网络命名空间：',
-      '  · WSL2 的 127.0.0.1 是它自己的回环，连不到宿主机的控制端口（宿主机的 127.0.0.1:9097 也不对外监听），',
-      '    命名管道更是完全用不了；',
-      '  · afc 探测节点还要用 mihomo 内核二进制，那个同样在 Windows 上。',
-      '请在 Windows 的 PowerShell / cmd 里跑 afc：npm i -g auto-fix-clash，再 afc groups。',
-      '确实要在 WSL 里用的话：Verge 打开「局域网连接」、把「外部控制器监听地址」改成 0.0.0.0:9097、放行防火墙，',
-      '然后 controller.endpoint 指向宿主机 IP（取 /etc/resolv.conf 里的 nameserver），',
-      '并用 probe.kernelPath 指一个 WSL 里可执行的 Linux 版 mihomo。',
+      'afc 跑在 WSL 里，而 Clash 客户端在 Windows 宿主机的另一侧，两者不在同一个网络命名空间：',
+      '  · WSL2 的 127.0.0.1 是 WSL 自己的回环，命名管道也跨不过去 —— 所以要么让两者能通，要么把 afc 放到 Windows 上跑；',
+      '  · afc 已经默认帮你做了这些：读 /mnt/c 下 Windows 客户端的运行时配置（外部控制端口与密钥），',
+      '    并把候选主机名换成 127.0.0.1（镜像网络模式）+ 宿主机地址（NAT 模式）；',
+      '  · 剩下要满足的：镜像网络模式最省事 —— 在 Windows 的 %USERPROFILE%\\.wslconfig 里写',
+      '    [wsl2] networkingMode=mirrored，然后 wsl --shutdown 重启 WSL，127.0.0.1:9097 就通了；',
+      '  · NAT 模式则需要「局域网连接」打开、外部控制地址改成 0.0.0.0:9097、放行防火墙（9097 不对外时只有镜像模式能通）；',
+      '  · 另外 afc 探测节点还要 mihomo 内核二进制，WSL 里没有 —— 用 probe.kernelPath 指一个 Linux 版 mihomo，',
+      '    或者干脆在 Windows 的 PowerShell / cmd 里跑 afc（npm i -g auto-fix-clash）。',
     );
   } else {
     lines.push(
@@ -709,6 +768,13 @@ export function renderDiscoveryReport(report: DiscoveryReport): string {
     }
   }
 
+  if (facts.wslProfiles.length > 0) {
+    lines.push(`  WSL：Windows 用户目录 ${facts.wslProfiles.join('、')}`);
+    lines.push(`  WSL：候选宿主机地址 ${facts.wslHostAddresses.join('、')}`);
+  }
+  if (facts.wslConfigPaths.length > 0) {
+    lines.push(`  WSL：读到的 Windows 客户端配置 ${facts.wslConfigPaths.join('、')}`);
+  }
   if (facts.kernelPorts.length > 0) lines.push(`  内核监听端口：${facts.kernelPorts.join('、')}`);
   if (facts.sid) lines.push(`  当前用户 SID：${facts.sid}`);
   if (facts.vergePipes.length > 0) lines.push(`  按 SID 推导的 Verge 管道：${facts.vergePipes[0]}`);

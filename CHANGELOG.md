@@ -1,5 +1,20 @@
 # 更新日志
 
+## 1.2.0
+
+- **在 WSL（bash）里也能用**：afc 会从 `/mnt/c` 读 Windows 客户端的运行时配置（外部控制端口与密钥），
+  并把候选主机名换成 `127.0.0.1`（镜像网络模式）与宿主机地址（NAT 模式的网关 / DNS），两边都试。
+  Windows 的命名管道跨不过 WSL 边界，所以不再生成这类候选；剩下的只是网络层：
+  推荐在 `.wslconfig` 里开 `networkingMode=mirrored`，或让客户端监听 `0.0.0.0` 并放行防火墙。
+  `afc fix` / `afc doctor` 仍需一个能跑的 Linux 版 mihomo（`probe.kernelPath`）。
+- **`afc groups` 打印编号**：第一列是编号，组名带 emoji / 中文时不用再手打；
+  编号可直接用于 `afc add <编号>`、`afc remove <编号>`、`afc fix --group <编号>`（doctor 同理）。
+  编号来自最近一次 `afc groups`（缓存在运行状态目录，`--json` 输出里也带）。
+- `afc groups` 结尾给出可直接抄的命令示例（`afc add <编号>` 等）。
+- 顺带修掉 `afc add --config <已有配置>` 会忽略该配置里 `controller` 段的问题 ——
+  它以前为了「配置文件可能还不存在」而完全不读它，于是「先 groups 拿编号、再 add 编号」这条
+  最自然的路径会连不上控制器。
+
 ## 1.1.4
 
 - **认出「afc 跑在 WSL 里」这种跑错地方的情况**：WSL2 的 `127.0.0.1` 是它自己的回环，连不到 Windows
