@@ -76,11 +76,14 @@ test('目录扫描能找到内核（含子目录），并跳过无关文件', ()
     assert.ok(!found.some((p) => p.endsWith('notes.txt')));
     assert.ok(!found.some((p) => p.includes(join('a', 'b', 'c'))), '超过深度上限的不扫');
 
-    // POSIX 上要求可执行位
+    // 可执行位的语义只在 POSIX 上成立：Windows 的 chmod 只管只读位，
+    // 所以这条断言必须按平台分开，否则在 Windows CI 上必然失败。
     const nonExec = join(root, 'clash-meta');
     writeFileSync(nonExec, 'x');
-    chmodSync(nonExec, 0o644);
-    assert.ok(!scanKernelInDirs([root]).includes(nonExec), 'POSIX 上没有可执行位不算内核');
+    if (process.platform !== 'win32') {
+      chmodSync(nonExec, 0o644);
+      assert.ok(!scanKernelInDirs([root]).includes(nonExec), 'POSIX 上没有可执行位不算内核');
+    }
     // Windows 上没有可执行位这一说：存在且是文件即可（否则会把能用的内核判死）
     assert.ok(scanKernelInDirs([root], WIN).includes(nonExec));
   } finally {
