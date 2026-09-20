@@ -108,6 +108,34 @@ test('发现带 PID 的 Unix 套接字端点（路径随进程变化）', { skip
   }
 });
 
+// 回归：发现分两层（先便宜的配置层，再枚举进程/端口/管道），第二层命中时必须成功返回。
+// 1.1.3–1.2.1 漏了第二层的成功判定，导致「候选来自进程/套接字扫描」的用户（macOS/Linux 上的
+// Clash Party 就是这种）一律报「找到了控制端点候选，但都无法访问」，且已发布过。
+test('第二层（进程/套接字扫描）命中时也要成功返回', { skip: process.platform === 'win32' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'afc-test-'));
+  const socketPath = join(dir, 'mihomo-party-502-12345.sock');
+  const body = JSON.stringify({ meta: true, version: 'v1.19.27' });
+  const server = createNetServer((socket) => {
+    socket.on('data', () => {
+      socket.end(
+        `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+      );
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  try {
+    // 不指定显式端点，也不给运行时配置：只能靠第三组候选（套接字目录扫描 / 内核进程）找到
+    const found = await discoverController(
+      { runtimeConfigPath: join(dir, '不存在.yaml'), timeoutMs: 1500 },
+      { platform: 'linux', home: '/home/x', env: { XDG_RUNTIME_DIR: dir } },
+    );
+    assert.equal(found.version, 'v1.19.27');
+  } finally {
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('认证失败被识别为 unauthorized，而不是「没有端点」', async () => {
   const fake = await startFakeController(() => ({ status: 401, body: '{"message":"Unauthorized"}' }));
   try {
