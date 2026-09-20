@@ -1,6 +1,6 @@
 {
   "name": "auto-fix-clash",
-  "version": "1.1.4",
+  "version": "1.2.0",
   "description": "Clash / mihomo（Clash Meta）代理组自动测速与自愈：直连 ChatGPT、Codex 等目标站点判定节点的真实可用性，节点挂了自动换可用节点，并装好定时任务自动巡检；支持 macOS / Linux / Windows。Auto-fix and self-heal Clash / mihomo proxy groups by probing real endpoint reachability.",
   "keywords": [
     "clash",
