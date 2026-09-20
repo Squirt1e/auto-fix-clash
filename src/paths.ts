@@ -369,8 +369,13 @@ export function listKernelProcesses(ctx: PlatformContext = currentPlatform()): K
 /**
  * 只按「已知数据目录」列出的运行时配置路径（不启任何子进程，因此很便宜）。
  *
- * Clash Verge 把运行时配置写在数据目录下的 config.yaml；
- * Clash Party 写在 <dataDir>/work/config.yaml（diffWorkDir 时在 work/<profileId>/ 下）。
+ * 关键：Clash Verge Rev 真正喂给内核的运行时配置叫 **clash-verge.yaml**
+ * （见其 constants.rs 的 `files::RUNTIME_CONFIG`），而 `config.yaml` 是它的 clash 配置存储，
+ * 两者都要看 —— 只看后者会在不少安装上什么都读不到。
+ * Clash Party 则是 <dataDir>/work/config.yaml（diffWorkDir 时在 work/<profileId>/ 下）。
+ *
+ * 返回的是**待检查**的候选（不预先筛存在性），调用方读不到就当没有；
+ * 这样诊断输出才说得出「检查过哪些路径」。
  */
 export function staticRuntimeConfigPaths(
   explicit?: string,
@@ -379,7 +384,10 @@ export function staticRuntimeConfigPaths(
   const j = joinFor(ctx);
   const paths: string[] = [];
   if (explicit) paths.push(explicit);
-  for (const dir of clashVergeDataDirs(ctx)) paths.push(j(dir, 'config.yaml'));
+  for (const dir of clashVergeDataDirs(ctx)) {
+    paths.push(j(dir, 'clash-verge.yaml'));
+    paths.push(j(dir, 'config.yaml'));
+  }
   for (const dir of clashPartyDataDirs(ctx)) paths.push(j(dir, 'config.yaml'));
   const partyWork = j(clashPartyDataDir(ctx), 'work');
   paths.push(j(partyWork, 'config.yaml'));
@@ -391,11 +399,11 @@ export function staticRuntimeConfigPaths(
   } catch {
     // work 目录不存在时忽略
   }
-  return [...new Set(paths.filter((p) => existsSync(p)))];
+  return [...new Set(paths)];
 }
 
 /**
- * 候选的运行时配置文件路径。
+ * 候选的运行时配置文件路径（只返回真实存在的文件）。
  *
  * 先放进程派生出来的（-f / -d 最权威，能覆盖 diffWorkDir 这类设置），再补数据目录。
  * 只想拿「便宜的那部分」时用 staticRuntimeConfigPaths。

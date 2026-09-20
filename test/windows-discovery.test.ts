@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpServer, type Server } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -9,9 +9,11 @@ import {
   ControllerDiscoveryError,
   candidateEndpoints,
   cheapPlan,
+  describeDiscovery,
   discoverController,
   parseEndpointString,
   planDiscovery,
+  renderDiscoveryReport,
 } from '../src/controller/discovery.ts';
 import { pipePathsFromNames } from '../src/controller/pipe-scan.ts';
 import {
@@ -22,6 +24,7 @@ import {
   parseWindowsProcessJson,
   parseWindowsTasklistCsv,
   readRuntimeConfig,
+  staticRuntimeConfigPaths,
 } from '../src/paths.ts';
 import { DEFAULT_CONTROLLER_PORTS, pipeCandidates, vergeSidecarPipeNames, type PlatformContext } from '../src/platform.ts';
 
@@ -351,4 +354,25 @@ test('发现失败时给出 Windows 专属排查提示与候选来源', async ()
       return true;
     },
   );
+});
+
+test('Verge 的运行时配置候选包含 clash-verge.yaml（真正喂给内核的那份）', () => {
+  // Verge Rev 的 files::RUNTIME_CONFIG = clash-verge.yaml；config.yaml 只是它的配置存储，
+  // 只看后者会在不少安装上读不到 external-controller-pipe
+  const paths = staticRuntimeConfigPaths(undefined, WINDOWS_CTX);
+  assert.ok(
+    paths.some((p) => p.endsWith('io.github.clash-verge-rev.clash-verge-rev\\clash-verge.yaml')),
+    `应包含 clash-verge.yaml：${paths.join('、')}`,
+  );
+  assert.ok(paths.some((p) => p.endsWith('io.github.clash-verge-rev.clash-verge-rev\\config.yaml')));
+  // 这些是「待检查」的候选，不预先按存在性过滤（否则诊断报告说不出检查过什么）
+  assert.ok(paths.every((p) => !existsSync(p)), '本机不是 Windows，这些路径都不该存在');
+});
+
+test('--verbose 报告会列出「检查过但不存在」的配置路径', () => {
+  const report = describeDiscovery({}, WINDOWS_CTX);
+  const text = renderDiscoveryReport(report);
+  assert.match(text, /检查过的配置路径/);
+  assert.match(text, /clash-verge\.yaml/);
+  assert.match(text, /命名管道枚举/);
 });

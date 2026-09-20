@@ -22,7 +22,7 @@ import {
   vergeSidecarPipeNames,
   type PlatformContext,
 } from '../platform.ts';
-import { listWindowsPipes } from './pipe-scan.ts';
+import { scanWindowsPipes } from './pipe-scan.ts';
 
 export interface DiscoveredController {
   endpoint: ControllerEndpoint;
@@ -239,7 +239,10 @@ export function cheapPlan(
   const facts = emptyFacts();
   const candidates: ControllerEndpoint[] = [];
   const push = makePush(candidates);
-  for (const configPath of staticRuntimeConfigPaths(options.runtimeConfigPath, ctx)) {
+  facts.windows = isWindows(ctx);
+  const configPaths = staticRuntimeConfigPaths(options.runtimeConfigPath, ctx);
+  facts.checkedConfigPaths = configPaths;
+  for (const configPath of configPaths) {
     collectConfigCandidates(configPath, options, facts, push);
   }
   for (const port of configuredPorts(options)) {
@@ -276,8 +279,17 @@ export interface DiscoveryFacts {
   kernelPorts: number[];
   /** 系统里实际存在的、像 mihomo 的命名管道。 */
   pipes: string[];
+  /** 枚举到的管道总数与枚举方式（用于区分「枚举失败」与「确实没有」）。 */
+  pipesEnumerated: number;
+  pipesMethod: 'fs' | 'powershell' | 'none';
   /** 按当前用户 SID 推导出的 Verge 管道。 */
   vergePipes: string[];
+  /** 当前用户的 SID（推导管道用的；拿不到说明 whoami/PowerShell 都失败了）。 */
+  sid?: string;
+  /** 检查过（不保证存在）的运行时配置路径。 */
+  checkedConfigPaths: string[];
+  /** 本次发现是否按 Windows 走（决定报告里要不要讲管道枚举）。 */
+  windows: boolean;
   defaults: readonly number[];
   /** 从运行时配置里读到的 secret（用于给其它候选兜底，以及认证失败后的重试）。 */
   configSecret?: string;
@@ -317,9 +329,11 @@ export function planDiscovery(
   const facts = emptyFacts();
   const candidates: ControllerEndpoint[] = [];
   const push = makePush(candidates);
+  facts.windows = isWindows(ctx);
 
   const processes = listKernelProcesses(ctx);
   facts.kernelProcesses = processes;
+  facts.checkedConfigPaths = staticRuntimeConfigPaths(options.runtimeConfigPath, ctx);
 
   for (const configPath of runtimeConfigPathCandidates(options.runtimeConfigPath, ctx)) {
     collectConfigCandidates(configPath, options, facts, push);
@@ -359,6 +373,7 @@ export function planDiscovery(
     // Clash Verge Rev 新版的管道名 = \\.\pipe\verge-mihomo-sidecar-<flavor>-<sha256(用户 SID)>，
     // 无法猜别人的，但可以算自己的。
     const sid = windowsUserSid();
+    if (sid) facts.sid = sid;
     if (sid) {
       facts.vergePipes = vergeSidecarPipeNames(sid);
       for (const path of facts.vergePipes) {
@@ -367,7 +382,10 @@ export function planDiscovery(
     }
 
     // 真实存在的管道名单（Clash Party 的 \\.\pipe\MihomoParty\mihomo 就在里面）
-    facts.pipes = listWindowsPipes(ctx);
+    const pipeScan = scanWindowsPipes(ctx);
+    facts.pipes = pipeScan.matched;
+    facts.pipesEnumerated = pipeScan.enumerated;
+    facts.pipesMethod = pipeScan.method;
     for (const path of facts.pipes) {
       push({ kind: 'pipe', path, source: '命名管道枚举', ...(fallbackSecret ? { secret: fallbackSecret } : {}) });
     }
@@ -405,7 +423,11 @@ function emptyFacts(): DiscoveryFacts {
     kernelProcesses: [],
     kernelPorts: [],
     pipes: [],
+    pipesEnumerated: 0,
+    pipesMethod: 'none',
     vergePipes: [],
+    checkedConfigPaths: [],
+    windows: false,
     defaults: DEFAULT_CONTROLLER_PORTS,
   };
 }
@@ -640,7 +662,11 @@ export function renderDiscoveryReport(report: DiscoveryReport): string {
   }
 
   if (facts.runtimeConfigs.length === 0) {
-    lines.push('  运行时配置：没有找到（客户端没跑过，或数据目录不在已知位置）');
+    lines.push('  运行时配置：没有找到可读的（下面列出「检查过但不存在」的路径）');
+    if (facts.checkedConfigPaths.length > 0) {
+      lines.push(`  检查过的配置路径（${facts.checkedConfigPaths.length} 个，都不存在）：`);
+      for (const path of facts.checkedConfigPaths) lines.push(`    - ${path}`);
+    }
   } else {
     for (const config of facts.runtimeConfigs) {
       const parts = [
@@ -671,8 +697,16 @@ export function renderDiscoveryReport(report: DiscoveryReport): string {
   }
 
   if (facts.kernelPorts.length > 0) lines.push(`  内核监听端口：${facts.kernelPorts.join('、')}`);
+  if (facts.sid) lines.push(`  当前用户 SID：${facts.sid}`);
   if (facts.vergePipes.length > 0) lines.push(`  按 SID 推导的 Verge 管道：${facts.vergePipes[0]}`);
-  if (facts.pipes.length > 0) lines.push(`  枚举到的命名管道：${facts.pipes.join('、')}`);
+  if (facts.pipes.length > 0) {
+    lines.push(`  枚举到的命名管道：${facts.pipes.join('、')}`);
+  } else if (facts.windows) {
+    // 区分「枚举不到」与「枚举了但没有像 mihomo 的」——两者的排查方向完全不同
+    lines.push(facts.pipesMethod === 'none'
+      ? '  命名管道枚举：失败（Node 与 PowerShell 两种方式都没读出来）'
+      : `  命名管道枚举：共 ${facts.pipesEnumerated} 个，其中没有像 mihomo 的（内核可能没在运行）`);
+  }
 
   lines.push(`  候选端点（${candidates.length} 个，按尝试顺序）：`);
   for (const c of candidates) lines.push(`    - ${describeEndpoint(c)}（${c.source}）`);

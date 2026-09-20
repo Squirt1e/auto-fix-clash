@@ -1,5 +1,16 @@
 # 更新日志
 
+## 1.1.3
+
+- **Clash Verge Rev 的运行时配置找错了文件**：它真正喂给内核的是 `clash-verge.yaml`
+  （`constants.rs` 的 `files::RUNTIME_CONFIG`），afc 以前只看数据目录里的 `config.yaml`（它的配置存储）。
+  现在两个都读，而且 `clash-verge.yaml` 排在前面 —— 这份是内核实际在跑的配置，
+  `external-controller` / `external-controller-pipe` / `secret` 一定在里面。
+- `--verbose` 的诊断报告更完整：列出**检查过但不存在**的配置路径、当前用户 SID，
+  以及命名管道枚举的总数与方式（用来区分「枚举失败」和「枚举到了但没有 mihomo 管道」）。
+- CI：发布后回查注册表的窗口从 60 秒放宽到 5 分钟。npm 对发布请求回 202（"being processed"），
+  版本要过几分钟才能读到，1.1.1 与 1.1.2 都因此被误判成「没有发布」。
+
 ## 1.1.2
 
 - 新增 `controller` 配置段（`endpoint` / `secret` / `ports`）：客户端把「外部控制地址」改成非默认端口时，

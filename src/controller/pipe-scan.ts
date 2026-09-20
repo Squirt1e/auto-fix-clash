@@ -93,19 +93,36 @@ function readPipeNamesViaPowerShell(): string[] {
   return [];
 }
 
-let pipeCache: string[] | undefined;
+let pipeScanCache: WindowsPipeScan | undefined;
 
 /** 清掉管道枚举缓存（测试用）。 */
 export function clearWindowsPipeCache(): void {
-  pipeCache = undefined;
+  pipeScanCache = undefined;
+}
+
+export interface WindowsPipeScan {
+  /** 像 mihomo 控制端点的管道。 */
+  matched: string[];
+  /** 一共枚举到多少个管道，以及用的是哪种枚举方式（诊断用）。 */
+  enumerated: number;
+  method: 'fs' | 'powershell' | 'none';
+}
+
+/** 枚举命名管道并挑出候选；同时把「扫了多少个、用的哪种方式」带出来供诊断。 */
+export function scanWindowsPipes(ctx: PlatformContext): WindowsPipeScan {
+  if (!isWindows(ctx)) return { matched: [], enumerated: 0, method: 'none' };
+  if (pipeScanCache) return pipeScanCache;
+  let names = readPipeNamesViaFs();
+  let method: WindowsPipeScan['method'] = names.length > 0 ? 'fs' : 'none';
+  if (names.length === 0) {
+    names = readPipeNamesViaPowerShell();
+    if (names.length > 0) method = 'powershell';
+  }
+  pipeScanCache = { matched: pipePathsFromNames(names), enumerated: names.length, method };
+  return pipeScanCache;
 }
 
 /** 系统里实际存在的、看起来像 mihomo 控制端点的命名管道。 */
 export function listWindowsPipes(ctx: PlatformContext): string[] {
-  if (!isWindows(ctx)) return [];
-  if (pipeCache) return pipeCache;
-  const names = readPipeNamesViaFs();
-  const found = names.length > 0 ? names : readPipeNamesViaPowerShell();
-  pipeCache = pipePathsFromNames(found);
-  return pipeCache;
+  return scanWindowsPipes(ctx).matched;
 }
