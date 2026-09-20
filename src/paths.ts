@@ -53,7 +53,7 @@ export function kernelPathCandidates(ctx: PlatformContext = currentPlatform()): 
 }
 
 /** 客户端主程序（GUI）的镜像名 —— 用它来推断内核在哪：内核就在它旁边。 */
-const CLIENT_IMAGE_PATTERN = /^(clash[- ]?verge|verge|clash[- ]?party|mihomo[- ]?party)(\.exe)?$/i;
+const CLIENT_IMAGE_PATTERN = /^(clash[- ]?verge([- ]?rev)?([- ]?service)?|verge|clash[- ]?party|mihomo[- ]?party)(\.exe)?$/i;
 /** 客户端主程序在 POSIX 上的命令行特征。 */
 const CLIENT_COMMAND_PATTERN = /(Clash Verge|Clash Party|mihomo-party)(\.app)?\//;
 
@@ -65,16 +65,48 @@ const CLIENT_COMMAND_PATTERN = /(Clash Verge|Clash Party|mihomo-party)(\.app)?\/
  * 其次，正在运行的内核进程本身的 exe 路径当然也可以直接用。
  */
 export function kernelPathsFromProcesses(ctx: PlatformContext = currentPlatform()): string[] {
-  const found: string[] = [];
+  const candidates = kernelPathCandidatesFromProcesses(
+    listKernelProcesses(ctx),
+    listClientProcesses(ctx),
+  );
+  return candidates.filter((path) => isExecutableFile(path, ctx));
+}
+
+/**
+ * 从进程信息推出「内核可能在哪」（不过滤存在性，纯函数，便于测试）。
+ *
+ * 两条来源：
+ *   1. 正在运行的内核进程自己的 exe 路径（最直接）；
+ *   2. 客户端主程序同级的内核 —— Verge 自己就是取 `current_exe()` 的同级文件，
+ *      所以只要知道客户端主程序在哪，内核必然在它旁边（自定义/便携目录都不例外）。
+ */
+export function kernelPathCandidatesFromProcesses(
+  kernelProcesses: readonly KernelProcess[],
+  clientProcesses: readonly KernelProcess[],
+): string[] {
+  const out: string[] = [];
   const remember = (path: string | undefined): void => {
-    if (!path) return;
-    if (!found.includes(path) && isExecutableFile(path, ctx)) found.push(path);
+    if (path && !out.includes(path)) out.push(path);
   };
-  for (const proc of listKernelProcesses(ctx)) remember(proc.execPath);
-  for (const proc of listClientProcesses(ctx)) {
+  for (const proc of kernelProcesses) remember(proc.execPath);
+  for (const proc of clientProcesses) {
     for (const path of siblingKernelPaths(proc.execPath)) remember(path);
   }
-  return found;
+  return out;
+}
+
+/** 内核与客户端主程序所在的目录（用于兜底扫描）。 */
+export function processDirectories(
+  kernelProcesses: readonly KernelProcess[],
+  clientProcesses: readonly KernelProcess[],
+): string[] {
+  const out: string[] = [];
+  for (const proc of [...kernelProcesses, ...clientProcesses]) {
+    if (!proc.execPath) continue;
+    const dir = dirnameLike(proc.execPath);
+    if (!out.includes(dir)) out.push(dir);
+  }
+  return out;
 }
 
 /** 镜像名像不像客户端主程序（Clash Verge / Clash Party 的 GUI）。 */
@@ -85,13 +117,13 @@ export function isClientImageName(name: string): boolean {
 /**
  * 命令行像不像客户端主程序。
  *
- * macOS 上内核也在 .app 里（`Contents/Resources/sidecar/mihomo`），所以还得看**可执行文件名**：
- * 名字像内核的就不是客户端主程序。
+ * macOS 上内核也在 .app 里（`Contents/Resources/sidecar/mihomo`），所以还得排除
+ * 路径里带 sidecar、或名字像内核的那些。
  */
 export function isClientCommand(command: string): boolean {
   if (!CLIENT_COMMAND_PATTERN.test(command)) return false;
   // 名字像内核、或路径里有 sidecar 的，是内核而不是客户端主程序
-  return !/[\\/](verge-)?mihomo(\s|$)|[\\/]sidecar[\\/]/i.test(command);
+  return !/[\/](verge-)?mihomo(\s|$)|[\/]sidecar[\/]/i.test(command);
 }
 
 /**
@@ -101,7 +133,7 @@ export function isClientCommand(command: string): boolean {
  * 里带空格，会被截断。.app 的布局是固定的，直接按 bundle 推更可靠。
  */
 export function appBundleBinary(command: string): string | undefined {
-  const match = /^(.*?)\.app[\\/]Contents[\\/]/.exec(command.trim());
+  const match = /^(.*?)\.app[\/]Contents[\/]/.exec(command.trim());
   if (!match?.[1]) return undefined;
   const root = `${match[1]}.app`;
   const name = posixBasename(root).replace(/\.app$/, '');
@@ -125,7 +157,7 @@ export function listClientProcesses(ctx: PlatformContext = currentPlatform()): K
     const byCommand = command !== undefined && isClientCommand(command);
     if (!byName && !byCommand) continue;
     // macOS 上没有 /proc：用 .app 布局推出主程序路径；其它 POSIX 用命令行首 token
-    const resolved = execPath ?? (command ? appBundleBinary(command) ?? firstTokenPath(command) : undefined);
+    const resolved = execPath ?? (command ? appBundleBinary(command) ?? execPathFromCommand(command) : undefined);
     if (!resolved) continue;
     results.push({ pid, command: command ?? name, execPath: resolved });
   }
@@ -218,29 +250,42 @@ export class KernelNotFoundError extends Error {
  * 前三步覆盖了「客户端装在哪儿都能找到」，第四步是自定义布局的兜底。
  */
 export function findKernelBinary(explicit?: string, ctx: PlatformContext = currentPlatform()): string {
+  return resolveKernelBinary(explicit, ctx).path;
+}
+
+/** 选中了哪个内核二进制、依据是什么（--verbose 的诊断要能说清这点）。 */
+export interface KernelChoice {
+  path: string;
+  source: string;
+}
+
+export function resolveKernelBinary(explicit?: string, ctx: PlatformContext = currentPlatform()): KernelChoice {
   const tried: string[] = [];
   if (explicit) {
-    if (isExecutableFile(explicit, ctx)) return explicit;
+    if (isExecutableFile(explicit, ctx)) return { path: explicit, source: 'probe.kernelPath' };
     tried.push(`${explicit}（配置中指定，不是可执行文件）`);
   }
 
   for (const path of kernelPathsFromProcesses(ctx)) {
     tried.push(`${path}（来自正在运行的进程）`);
-    if (isExecutableFile(path, ctx)) return path;
+    if (isExecutableFile(path, ctx)) {
+      return { path, source: '正在运行的进程（内核自己或客户端主程序同级）' };
+    }
   }
 
   for (const candidate of kernelPathCandidates(ctx)) {
     tried.push(candidate);
-    if (isExecutableFile(candidate, ctx)) return candidate;
+    if (isExecutableFile(candidate, ctx)) return { path: candidate, source: '已知安装位置' };
   }
 
-  const clientDirs = listClientProcesses(ctx)
-    .map((proc) => (proc.execPath ? dirname(proc.execPath) : undefined))
-    .filter((d): d is string => d !== undefined);
-  const scanned = scanKernelInDirs(clientDirs, ctx);
+  // 兜底扫描：内核与客户端进程所在的目录都扫一遍（自定义布局时靠它）
+  const scanned = scanKernelInDirs(
+    processDirectories(listKernelProcesses(ctx), listClientProcesses(ctx)),
+    ctx,
+  );
   for (const path of scanned) {
     tried.push(`${path}（在客户端目录里扫描到）`);
-    if (isExecutableFile(path, ctx)) return path;
+    if (isExecutableFile(path, ctx)) return { path, source: '客户端目录扫描' };
   }
 
   const lookup = isWindows(ctx) ? { cmd: 'where', args: [] } : { cmd: 'which', args: [] };
@@ -252,7 +297,7 @@ export function findKernelBinary(explicit?: string, ctx: PlatformContext = curre
       }).trim();
       // where 可能返回多行，取第一行
       const foundOut = out.split(/\r?\n/)[0]?.trim();
-      if (foundOut && isExecutableFile(foundOut, ctx)) return foundOut;
+      if (foundOut && isExecutableFile(foundOut, ctx)) return { path: foundOut, source: 'PATH' };
     } catch {
       tried.push(`PATH 中的 ${name}`);
     }
@@ -460,28 +505,68 @@ function tryTasklist(): WindowsProcessEntry[] {
 }
 
 /**
- * 取指定进程的命令行（只查这些 PID，不做全量扫描）。
+ * 取指定进程的详细信息（命令行 + 可执行文件路径），只查这些 PID，不做全量扫描。
+ *
+ * 为什么两者都要：命令行里有 `-d` / `-f` / `-ext-ctl*`，而 **ExecutablePath 才能回答
+ * 「客户端装在哪」** —— Windows 上内核就在客户端主程序旁边，这是自定义/便携安装目录
+ * 唯一可靠的线索。之前只取了命令行、把 ExecutablePath 丢掉了，于是这条线索一直没用上。
  *
  * Windows PowerShell 5.1 默认按控制台代码页（简中是 GBK）写 stdout，
- * 用 UTF-8 解码会把中文用户名一类的命令行弄成乱码，因此先强制 UTF-8 输出。
+ * 用 UTF-8 解码会把中文用户名一类的路径弄成乱码，因此先强制 UTF-8 输出。
  */
-function tryPowerShellCommands(pids: readonly number[]): Map<number, string> {
-  const found = new Map<number, string>();
+function tryPowerShellDetails(pids: readonly number[]): Map<number, ProcessDetails> {
+  const out = new Map<number, ProcessDetails>();
+  if (pids.length === 0) return out;
   const filter = pids.map((pid) => `ProcessId=${pid}`).join(' or ');
   const raw = runPowerShell(
     '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ' +
       `Get-CimInstance Win32_Process -Filter "${filter}" | ` +
       'Select-Object ProcessId,Name,CommandLine,ExecutablePath | ConvertTo-Json -Compress',
   );
-  if (!raw) return found;
+  if (!raw) return out;
   for (const entry of parseWindowsProcessJson(raw)) {
-    if (entry.command) found.set(entry.pid, entry.command);
+    out.set(entry.pid, {
+      ...(entry.command ? { command: entry.command } : {}),
+      ...(entry.execPath ? { execPath: entry.execPath } : {}),
+    });
   }
-  return found;
+  return out;
+}
+
+/** PowerShell 能给出的进程详情。 */
+interface ProcessDetails {
+  command?: string;
+  execPath?: string;
 }
 
 /**
- * 列出 Windows 上的进程（镜像名 + 能读到的命令行）。
+ * 把 tasklist 的「镜像名 + PID」与 PowerShell 的详情合起来（纯函数）。
+ *
+ * tasklist 快且不受权限影响，但没有路径；ExecutablePath 只能靠 WMI 拿。
+ * 两者都要，才能既认出进程、又知道它在哪个目录。
+ */
+export function mergeWindowsProcessDetails(
+  entries: readonly WindowsProcessEntry[],
+  details: ReadonlyMap<number, ProcessDetails>,
+): WindowsProcessEntry[] {
+  return entries.map((entry) => {
+    const detail = details.get(entry.pid);
+    if (!detail) return { ...entry };
+    const command = detail.command ?? entry.command;
+    const execPath = detail.execPath ?? entry.execPath;
+    return { ...entry, ...(command ? { command } : {}), ...(execPath ? { execPath } : {}) };
+  });
+}
+
+/** 值得去查详情的进程：内核，以及客户端主程序（后者的目录就是内核所在的目录）。 */
+export function pidsNeedingDetails(entries: readonly WindowsProcessEntry[]): number[] {
+  return entries
+    .filter((entry) => isKernelImageName(entry.name) || isClientImageName(entry.name))
+    .map((entry) => entry.pid);
+}
+
+/**
+ * 列出 Windows 上的进程（镜像名 + 能读到的命令行与可执行文件路径）。
  *
  * 顺序是刻意的：
  *   1. `tasklist` 拿全部进程的镜像名与 PID —— 只要一两百毫秒，且不受权限影响；
@@ -495,14 +580,8 @@ function runWindowsProcessList(): WindowsProcessEntry[] {
   if (windowsProcessCache) return windowsProcessCache;
 
   let entries = tryTasklist();
-  const kernelPids = entries.filter((e) => isKernelImageName(e.name)).map((e) => e.pid);
-  if (kernelPids.length > 0) {
-    const commands = tryPowerShellCommands(kernelPids);
-    entries = entries.map((e) => {
-      const command = commands.get(e.pid);
-      return command ? { ...e, command } : e;
-    });
-  }
+  // 内核 + 客户端主程序都要详情：前者给 -d/-f/-ext-ctl*，后者给「内核在哪个目录」
+  entries = mergeWindowsProcessDetails(entries, tryPowerShellDetails(pidsNeedingDetails(entries)));
 
   if (entries.length === 0) {
     const raw = runPowerShell(
@@ -535,18 +614,44 @@ function runProcessList(ctx: PlatformContext): WindowsProcessEntry[] {
     if (!command) continue;
     const pid = Number(pidText);
     // 命令行首 token 通常就是可执行文件路径；/proc/<pid>/exe 更权威（Linux 有，macOS 没有）
-    const execPath = procExecPath(pid) ?? firstTokenPath(command);
+    const execPath = procExecPath(pid) ?? execPathFromCommand(command);
     out.push({ pid, name: '', command, ...(execPath ? { execPath } : {}) });
   }
   posixProcessCache = out;
   return out;
 }
 
-/** 命令行首 token 若是绝对路径就当作可执行文件（去掉可能的引号）。 */
-function firstTokenPath(command: string): string | undefined {
-  const match = /^"([^"]+)"|^(\S+)/.exec(command.trim());
-  const token = (match?.[1] ?? match?.[2] ?? '').trim();
-  return token.startsWith('/') ? token : undefined;
+/**
+ * 从命令行里取出可执行文件路径。
+ *
+ * 两个坑都得躲开：
+ *   1. macOS 的路径带空格（`/Applications/Clash Party.app/...`），而 `ps` 输出**不加引号**，
+ *      按第一个空格切会得到 `/Applications/Clash` 这种半截路径（曾因此让兜底扫描去扫 /Applications）；
+ *   2. 服务模式下 WMI 的 ExecutablePath 可能为空，只剩命令行可用。
+ * 做法：带引号的直接取引号内；否则按空格逐步扩展取**存在的最长前缀**，都不存在就放弃
+ * （宁可没有，也不要把半截路径传出去）。
+ */
+export function execPathFromCommand(
+  command: string,
+  exists: (path: string) => boolean = existsSync,
+): string | undefined {
+  const trimmed = command.trim();
+  const quoted = /^"([^"]+)"/.exec(trimmed);
+  if (quoted?.[1] && exists(quoted[1])) return quoted[1];
+
+  const absolute = (token: string): boolean =>
+    token.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(token) || token.startsWith('\\\\');
+  let acc = '';
+  const prefixes: string[] = [];
+  for (const part of trimmed.split(' ')) {
+    acc = acc === '' ? part : `${acc} ${part}`;
+    if (!absolute(acc)) break;
+    prefixes.push(acc);
+  }
+  for (const prefix of prefixes.reverse()) {
+    if (exists(prefix)) return prefix;
+  }
+  return undefined;
 }
 
 /** Linux 上 /proc/<pid>/exe 指向真实的可执行文件（被替换过也能拿到）。 */
@@ -559,10 +664,15 @@ function procExecPath(pid: number): string | undefined {
   }
 }
 
+/** 进程的可执行文件路径：优先用 WMI 的，其次从命令行首 token 推（服务模式下前者常为空）。 */
+function resolveExecPath(execPath: string | undefined, command: string | undefined): string | undefined {
+  return execPath ?? (command ? execPathFromCommand(command) : undefined);
+}
+
 /** 列出正在运行的 mihomo 内核进程（含工作目录与控制端点参数）。 */
 export function listKernelProcesses(ctx: PlatformContext = currentPlatform()): KernelProcess[] {
   const results: KernelProcess[] = [];
-  for (const { pid, name, command } of runProcessList(ctx)) {
+  for (const { pid, name, command, execPath } of runProcessList(ctx)) {
     // Windows 上镜像名就够（服务模式读不到命令行）；POSIX 只能看命令行。
     const byName = name !== '' && isKernelImageName(name);
     const byCommand = command !== undefined && KERNEL_COMMAND_PATTERN.test(command);
@@ -573,6 +683,7 @@ export function listKernelProcesses(ctx: PlatformContext = currentPlatform()): K
       name,
       command: command ?? name,
       ...(command ? parseKernelArgs(command) : {}),
+      ...(resolveExecPath(execPath, command) ? { execPath: resolveExecPath(execPath, command)! } : {}),
     });
   }
   return results;

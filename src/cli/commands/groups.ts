@@ -4,7 +4,7 @@ import { EXIT_ENVIRONMENT, EXIT_OK } from '../../exit-codes.ts';
 import { runtimeConfigPathCandidates } from '../../paths.ts';
 import { writeGroupsIndex } from '../groups-index.ts';
 import { pad } from '../format.ts';
-import { isQuiet, openRuntime } from '../runtime.ts';
+import { isQuiet, kernelDiagnosticLine, openRuntime } from '../runtime.ts';
 import { optBoolean, type CommandContext } from '../context.ts';
 
 export interface GroupRow {
@@ -114,7 +114,8 @@ export async function run(context: CommandContext): Promise<number> {
       `afc 配置：${runtime.config.sourcePath ?? '（未使用配置文件，采用内置默认）'}\n` +
       `控制器：${describeEndpoint(runtime.controller.endpoint)}\n` +
       `内核版本：${runtime.controller.version}\n` +
-      `运行时配置：${configPath ?? '（未找到）'}\n\n`,
+      `运行时配置：${configPath ?? '（未找到）'}\n` +
+      (kernelDiagnosticLine() ?? '').replace(/\n$/, '') + '\n',
     );
   }
 

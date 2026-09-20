@@ -9,6 +9,7 @@ import {
   type DiscoveredController,
 } from '../controller/discovery.ts';
 import { isGroupIndexArg, resolveGroupArg } from './groups-index.ts';
+import { resolveKernelBinary } from '../paths.ts';
 import { expandAutoTargets } from '../targets/auto.ts';
 import { optBoolean, optString, resolveTargets, type CommandContext } from './context.ts';
 
@@ -52,6 +53,21 @@ export async function openRuntime(context: CommandContext): Promise<Runtime> {
       process.stderr.write(renderDiscoveryReport(describeDiscovery(options)) + '\n');
     }
     throw err;
+  }
+}
+
+/**
+ * `--verbose` 时报告「afc 选了哪个内核二进制、依据是什么」。
+ *
+ * 这类问题（客户端装在自定义目录、内核缺失）以前只能靠报错反推；现在诊断输出里直接能看到。
+ */
+export function kernelDiagnosticLine(): string | undefined {
+  try {
+    const choice = resolveKernelBinary();
+    return `内核：${choice.path}（${choice.source}）\n`;
+  } catch {
+    // 找不到内核时不在诊断里抢先报错：真正用到它的命令会给出完整说明
+    return undefined;
   }
 }
 

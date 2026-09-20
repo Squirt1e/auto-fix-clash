@@ -3,7 +3,7 @@ import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK, EXIT_USAGE } from '../.
 import { describeEndpoints, ProbeEngine, type NodeProbeResult } from '../../probe/engine.ts';
 import { loadNodeDefinitions } from '../../heal/repair.ts';
 import { pad, formatMs, interactive, clearProgressLine } from '../format.ts';
-import { isQuiet, openRuntime, planTargets } from '../runtime.ts';
+import { isQuiet, kernelDiagnosticLine, openRuntime, planTargets } from '../runtime.ts';
 import { optBoolean, type CommandContext } from '../context.ts';
 
 const VERDICT_LABEL: Record<NodeProbeResult['verdict'], string> = {
@@ -87,7 +87,8 @@ export async function run(context: CommandContext): Promise<number> {
         if (verbose) {
           process.stdout.write(
             `  判据：${describeEndpoints(target)}（${note}）\n` +
-            `  并发上限：${runtime.config.probe.concurrency}\n`,
+            `  并发上限：${runtime.config.probe.concurrency}\n` +
+            (kernelDiagnosticLine() ?? ''),
           );
         }
       }

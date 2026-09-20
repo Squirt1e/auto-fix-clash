@@ -3,10 +3,19 @@ import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import {
   KernelNotFoundError,
+  listClientProcesses,
+  listKernelProcesses,
+  execPathFromCommand,
   isClientCommand,
   isClientImageName,
+  kernelPathCandidatesFromProcesses,
+  mergeWindowsProcessDetails,
+  parseWindowsProcessJson,
+  pidsNeedingDetails,
+  processDirectories,
   scanKernelInDirs,
   siblingKernelPaths,
 } from '../src/paths.ts';
@@ -95,5 +104,95 @@ test('找不到内核时：默认只给下一步，--verbose 才列全部位置'
     assert.match(long, /Program Files/);
   } finally {
     setVerbose(false);
+  }
+});
+
+test('tasklist 只给名字和 PID，必须把 PowerShell 的 ExecutablePath 合进来', () => {
+  // 这正是「客户端装在哪」的唯一线索：Windows 上 tasklist 不带路径，
+  // 若只合并命令行而丢掉 ExecutablePath，就永远找不到自定义安装目录里的内核
+  const tasklist = [
+    { pid: 100, name: 'Clash Verge.exe' },
+    { pid: 200, name: 'verge-mihomo.exe' },
+    { pid: 300, name: 'chrome.exe' },
+  ];
+  const details = new Map([
+    [100, { command: '"D:\\tools\\Clash Verge\\Clash Verge.exe"', execPath: 'D:\\tools\\Clash Verge\\Clash Verge.exe' }],
+    [200, { command: '"D:\\tools\\Clash Verge\\verge-mihomo.exe" -d "C:\\Users\\x\\AppData\\Roaming\\io.github.clash-verge-rev.clash-verge-rev"' }],
+  ]);
+  const merged = mergeWindowsProcessDetails(tasklist, details);
+  assert.equal(merged[0]!.execPath, 'D:\\tools\\Clash Verge\\Clash Verge.exe');
+  assert.equal(merged[1]!.command?.includes('-d'), true);
+  // 没查详情的进程原样保留，不影响其它逻辑
+  assert.equal(merged[2]!.execPath, undefined);
+});
+
+test('要查详情的 PID 包含客户端主程序，而不只是内核', () => {
+  const pids = pidsNeedingDetails([
+    { pid: 100, name: 'Clash Verge.exe' },
+    { pid: 200, name: 'verge-mihomo.exe' },
+    { pid: 300, name: 'chrome.exe' },
+  ]);
+  assert.deepEqual(pids, [100, 200]);
+});
+
+test('客户端同级的内核是候选：Windows 自定义安装目录也成立', () => {
+  const candidates = kernelPathCandidatesFromProcesses(
+    [],
+    [{ pid: 1, command: 'Clash Verge.exe', execPath: 'D:\\tools\\Clash Verge\\Clash Verge.exe' }],
+  );
+  assert.ok(candidates.includes('D:\\tools\\Clash Verge\\verge-mihomo.exe'), candidates.join('、'));
+  assert.ok(candidates.includes('D:\\tools\\Clash Verge\\verge-mihomo-alpha.exe'));
+  // 内核自己的路径优先（它就在跑）
+  const withKernel = kernelPathCandidatesFromProcesses(
+    [{ pid: 2, command: 'mihomo.exe', execPath: 'E:\\green\\mihomo.exe' }],
+    [],
+  );
+  assert.equal(withKernel[0], 'E:\\green\\mihomo.exe');
+});
+
+test('从命令行取路径要躲开「未加引号且带空格」的截断（macOS 上踩过）', () => {
+  const real = '/Applications/Clash Party.app/Contents/Resources/sidecar/mihomo';
+  const exists = (p: string): boolean => p === real;
+  // ps 输出不带引号，按空格切会得到 /Applications/Clash —— 必须取「存在的最长前缀」
+  assert.equal(execPathFromCommand(`${real} -d /tmp/work -ext-ctl-unix /tmp/x.sock`, exists), real);
+  // 加引号的形式
+  assert.equal(execPathFromCommand(`"${real}" -d /tmp`, exists), real);
+  // 什么都对不上时宁可没有，也不要把半截路径传出去（否则兜底扫描会去扫 /Applications）
+  assert.equal(execPathFromCommand('/Applications/Clash Party.app/x -d /tmp', exists), undefined);
+  assert.equal(execPathFromCommand('not-a-path -x', exists), undefined);
+  // Windows：反斜杠路径同样按「存在的最长前缀」取
+  const winExe = 'D:\\tools\\Clash Verge\\verge-mihomo.exe';
+  assert.equal(
+    execPathFromCommand(`${winExe} -d "C:\\Users\\x"`, (p) => p === winExe),
+    winExe,
+  );
+});
+
+test('兜底扫描只扫内核与客户端进程所在目录，不扫整个 /Applications', () => {
+  const dirs = processDirectories(
+    [{ pid: 1, command: 'mihomo', execPath: '/Applications/Clash Party.app/Contents/Resources/sidecar/mihomo' }],
+    [{ pid: 2, command: 'Clash Party', execPath: '/Applications/Clash Party.app/Contents/MacOS/Clash Party' }],
+  );
+  assert.deepEqual(dirs, [
+    '/Applications/Clash Party.app/Contents/Resources/sidecar',
+    '/Applications/Clash Party.app/Contents/MacOS',
+  ]);
+  assert.ok(!dirs.includes('/Applications'), '不能退化成一扫一大片');
+});
+
+test('PowerShell 的 ExecutablePath 会被解析出来（服务模式下可能为空）', () => {
+  const parsed = parseWindowsProcessJson(JSON.stringify([
+    { ProcessId: 1, Name: 'verge-mihomo.exe', CommandLine: '"D:\\a\\verge-mihomo.exe" -d D:\\w', ExecutablePath: 'D:\\a\\verge-mihomo.exe' },
+    { ProcessId: 2, Name: 'verge-mihomo.exe', CommandLine: null, ExecutablePath: null },
+  ]));
+  assert.equal(parsed[0]!.execPath, 'D:\\a\\verge-mihomo.exe');
+  assert.equal(parsed[1]!.execPath, undefined);
+});
+
+test('进程推导出的内核路径必须真实存在（不许把截断的半截路径传出去）', () => {
+  const procs = [...listKernelProcesses(), ...listClientProcesses()];
+  for (const proc of procs) {
+    if (!proc.execPath) continue;
+    assert.ok(existsSync(proc.execPath), `${proc.execPath} 不存在，说明路径被截断了（命令行按空格切的老毛病）`);
   }
 });
