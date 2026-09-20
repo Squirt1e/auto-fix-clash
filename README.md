@@ -181,22 +181,33 @@ controller:
 查看或关闭：系统设置 → 通用 → 登录项与扩展；`afc schedule status --verbose` 可核对任务文件路径。
 
 **在 WSL（bash）里跑 afc？**
-1.2.0 起支持：afc 会从 `/mnt/c` 读 Windows 客户端的运行时配置（外部控制端口与密钥），并把候选主机名
-换成 `127.0.0.1`（镜像网络模式）+ 宿主机地址（NAT 模式的网关 / DNS）。**剩下只差网络这一层**：
+请改用 Windows 的 PowerShell / cmd —— 在**跑 Clash 的那台机器上**运行：
 
-- 最省事：在 Windows 的 `%USERPROFILE%\.wslconfig` 里加
-  ```ini
-  [wsl2]
-  networkingMode=mirrored
-  ```
-  然后 `wsl --shutdown` 重启，`127.0.0.1:9097` 在 WSL 里就通了。
-- 或者 NAT 模式：Verge 打开「局域网连接」、把「外部控制器监听地址」改成 `0.0.0.0:9097`、放行防火墙
-  （只绑 `127.0.0.1` 的端口从 WSL 是连不上的）。
-- 另外 `afc fix` / `afc doctor` 要起临时内核实例，需要 Linux 版 mihomo：用 `probe.kernelPath` 指一个
-  放进 WSL 的可执行文件。`afc groups` / `afc add` 这类控制面操作不需要内核。
+```powershell
+npm i -g auto-fix-clash
+afc groups
+```
 
-嫌麻烦就直接在 Windows 的 PowerShell / cmd 里跑（`npm i -g auto-fix-clash`）：那边 afc 用命名管道，
-什么都不用配。
+WSL 与 Windows 不在同一个网络命名空间（WSL2 的 `127.0.0.1` 是它自己的回环，命名管道也跨不过去），
+而且 afc 探测节点还要用 Windows 上的 mihomo 内核二进制。要在 WSL 里用需要额外配网络，afc 不做自动适配；
+真需要的话用 `controller.endpoint` 指向宿主机 IP、并给 `probe.kernelPath` 准备一个 Linux 版 mihomo。
+
+**`afc doctor` / `afc fix` 说找不到 mihomo 内核二进制？**
+这两条命令要起临时内核实例，逐个节点发真实请求，所以需要一个 mihomo 可执行文件（afc 不下载、不内置内核）。
+afc 会按顺序找：正在运行的内核进程 → **客户端主程序旁边的内核**（Clash Verge 的 `verge-mihomo.exe` /
+`verge-mihomo-alpha.exe`，Clash Party 的 `resources\sidecar\mihomo.exe`，所以装在哪个目录都行）
+→ 常见安装位置 → 客户端目录扫描 → `PATH`。都不行就显式指定：
+
+```yaml
+probe:
+  kernelPath: D:\tools\Clash Verge\verge-mihomo.exe
+```
+
+**`afc schedule status` 说没安装，但我装过了？**
+1.2.2 起会给出**核验过**的状态：`install` 创建任务后会立刻回查一次，`status` 走的是 PowerShell 的
+`Get-ScheduledTask`（结构化字段，与系统语言无关）。此前版本在中文等本地化 Windows 上会把
+`schtasks` 的 GBK 输出按 UTF-8 读、按英文标签匹配，于是永远报告"未安装"。仍显示未安装时加 `--verbose`
+看任务名与后端，或手动 `schtasks /Query /TN auto-fix-clash-heal`。
 
 **会改我的 Clash 配置吗？**
 不会。afc 只写这几处：系统调度器的任务定义（macOS 的 `~/Library/LaunchAgents/`、

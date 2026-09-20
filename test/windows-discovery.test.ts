@@ -16,6 +16,7 @@ import {
   renderDiscoveryReport,
 } from '../src/controller/discovery.ts';
 import { pipePathsFromNames } from '../src/controller/pipe-scan.ts';
+import { setVerbose } from '../src/verbosity.ts';
 import {
   isKernelImageName,
   normalizeWindowsPipePath,
@@ -348,18 +349,44 @@ test('显式端点缺 secret 时，用运行时配置里的 secret 自动补上'
   }
 });
 
-test('发现失败时给出 Windows 专属排查提示与候选来源', async () => {
+test('默认输出精简：只给下一步，不铺开平台细节与候选清单', async () => {
   const closed = await freeClosedPort();
   await assert.rejects(
     () => discoverController({ explicit: `127.0.0.1:${closed}`, timeoutMs: 800 }, WINDOWS_CTX),
     (err: unknown) => {
       const message = (err as Error).message;
       assert.match(message, /Clash Verge Rev/);
-      assert.match(message, /MihomoParty/);
       assert.match(message, /--verbose/);
+      // 详细模式才该出现的东西：具体管道名、controller 配置示例
+      assert.doesNotMatch(message, /MihomoParty/);
+      assert.doesNotMatch(message, /controller:/);
+      assert.ok(message.split('\n').length <= 12, `默认提示过长（${message.split('\n').length} 行）`);
       return true;
     },
   );
+});
+
+test('--verbose 时才展开平台细节与配置写法', async () => {
+  const closed = await freeClosedPort();
+  setVerbose(true);
+  try {
+    await assert.rejects(
+      () => discoverController({ explicit: `127.0.0.1:${closed}`, timeoutMs: 800 }, WINDOWS_CTX),
+      (err: unknown) => {
+        const message = (err as Error).message;
+        assert.match(message, /MihomoParty/);
+        assert.match(message, /controller:/);
+        // 反斜杠要原样打出来（模板与普通字符串里被吃掉过两次，这里锁死）
+        assert.ok(
+          message.includes(String.raw`pipe:\\.\pipe\MihomoParty\mihomo`),
+          `管道示例的反斜杠不对：${message}`,
+        );
+        return true;
+      },
+    );
+  } finally {
+    setVerbose(false);
+  }
 });
 
 test('Verge 的运行时配置候选包含 clash-verge.yaml（真正喂给内核的那份）', () => {
@@ -390,7 +417,7 @@ test('detectWsl 认得出 WSL（env 与 /proc/version 两条路）', () => {
   assert.equal(detectWsl({}), false);
 });
 
-test('在 WSL 里跑时，报错会说明「Clash 在宿主机上，不在同一个网络命名空间」', async () => {
+test('在 WSL 里跑时，直接让用户去 Windows 的 PowerShell（不再讲一堆配置）', async () => {
   const closed = await freeClosedPort();
   const previous = { ...process.env };
   process.env['WSL_DISTRO_NAME'] = 'Ubuntu';
@@ -403,12 +430,11 @@ test('在 WSL 里跑时，报错会说明「Clash 在宿主机上，不在同一
       (err: unknown) => {
         const message = (err as Error).message;
         assert.match(message, /WSL/);
-        assert.match(message, /网络命名空间/);
-        // 要给出能直接照做的两条路：镜像网络模式 / 到 Windows 侧运行
-        assert.match(message, /networkingMode=mirrored/);
-        assert.match(message, /\/mnt\/c/);
-        // WSL 的提示要压过通用的 POSIX 提示（后者会让人以为只是 Clash 没跑）
-        assert.doesNotMatch(message, /Clash Party 用 Unix 套接字/);
+        assert.match(message, /PowerShell/);
+        assert.match(message, /npm i -g auto-fix-clash/);
+        // 默认不该再倒出镜像网络模式 / /mnt/c 那套配置说明（那正是被撤掉的桥接）
+        assert.doesNotMatch(message, /networkingMode=mirrored/);
+        assert.doesNotMatch(message, /\/mnt\/c/);
         return true;
       },
     );
