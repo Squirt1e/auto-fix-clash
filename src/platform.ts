@@ -39,10 +39,17 @@ export function currentPlatform(env: NodeJS.ProcessEnv = process.env): PlatformC
  * （内核 -d 工作目录、订阅档案文件）必须跟随它自己的风格，否则会出现
  * "C:\Users\...\profiles" 拼在 POSIX 路径上这类混搭，随后 readdir 直接失败。
  */
+export function looksLikeWindowsPath(value: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('\\\\') || value.includes('\\');
+}
+
 export function joinLike(base: string, ...parts: string[]): string {
-  const looksWindows =
-    /^[a-zA-Z]:[\\/]/.test(base) || base.startsWith('\\\\') || base.includes('\\');
-  return looksWindows ? win32.join(base, ...parts) : posix.join(base, ...parts);
+  return looksLikeWindowsPath(base) ? win32.join(base, ...parts) : posix.join(base, ...parts);
+}
+
+/** 按路径自身的风格取父目录（`dirname` 会按宿主平台判断，混用会得到 ".\..." 这种半截路径）。 */
+export function dirnameLike(path: string): string {
+  return looksLikeWindowsPath(path) ? win32.dirname(path) : posix.dirname(path);
 }
 
 export function isWindows(ctx: PlatformContext): boolean {
