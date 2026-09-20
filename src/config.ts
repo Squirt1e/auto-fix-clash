@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import { parseEndpointString } from './controller/discovery.ts';
 import { UsageError } from './errors.ts';
 import { afcConfigPath, currentPlatform } from './platform.ts';
 
@@ -108,9 +109,30 @@ export interface ScheduleSettings {
   intervalSeconds: number;
 }
 
+/**
+ * 内核控制端点的设置。
+ *
+ * 为什么需要它：客户端界面上的「混合代理端口」是给浏览器/系统代理用的，
+ * 与 afc 需要的「外部控制地址」是两回事；两边都可以改端口，因此必须有一个
+ * 地方能明确告诉 afc 控制端点在哪个端口上（尤其是定时任务，它不带任何命令行参数）。
+ */
+export interface ControllerSettings {
+  /**
+   * 显式指定的控制端点，支持三种写法：
+   * `127.0.0.1:9097`、`unix:/tmp/mihomo-party.sock`、`pipe:\\.\pipe\MihomoParty\mihomo`。
+   * 省略时自动发现。
+   */
+  endpoint?: string;
+  /** 控制端点的密钥（mihomo 的 secret / 客户端的「外部控制访问密钥」）。省略时从运行时配置里读。 */
+  secret?: string;
+  /** 自动发现时额外要试的控制端口（把「外部控制地址」改成非默认端口时用）。 */
+  ports: number[];
+}
+
 export interface AfcConfig {
   probe: ProbeSettings;
   schedule: ScheduleSettings;
+  controller: ControllerSettings;
   targets: TargetConfig[];
   /** 配置文件的实际来源路径；使用内置默认时为 undefined。 */
   sourcePath?: string;
@@ -160,6 +182,10 @@ export const DEFAULT_PROBE: ProbeSettings = {
 
 export const DEFAULT_SCHEDULE: ScheduleSettings = {
   intervalSeconds: 300,
+};
+
+export const DEFAULT_CONTROLLER: ControllerSettings = {
+  ports: [],
 };
 
 export const MIN_SCHEDULE_INTERVAL_SECONDS = 60;
@@ -362,6 +388,59 @@ function normalizeProbeSettings(raw: unknown, problems: string[]): ProbeSettings
   return out;
 }
 
+/**
+ * 归一化 controller 段。
+ *
+ * 端点写法在这里就先校验：写错端口/路径时在「读配置」阶段报错，比等到发现阶段
+ * 抛个底层错误好定位（错误信息里会带上配置文件路径）。
+ */
+function normalizeController(raw: unknown, problems: string[]): ControllerSettings {
+  const out: ControllerSettings = { ports: [] };
+  if (raw === undefined || raw === null) return out;
+  if (!isPlainObject(raw)) {
+    problems.push('controller 必须是对象（可写 endpoint / secret / ports）');
+    return out;
+  }
+
+  const endpoint = raw['endpoint'];
+  if (endpoint !== undefined) {
+    if (!isNonEmptyString(endpoint)) {
+      problems.push('controller.endpoint 必须是非空字符串（如 127.0.0.1:9097 或 pipe:\\\\.\\pipe\\MihomoParty\\mihomo）');
+    } else {
+      try {
+        parseEndpointString(endpoint.trim());
+        out.endpoint = endpoint.trim();
+      } catch (err) {
+        problems.push(`controller.endpoint 无效：${(err as Error).message}`);
+      }
+    }
+  }
+
+  const secret = raw['secret'];
+  if (secret !== undefined) {
+    if (!isNonEmptyString(secret)) problems.push('controller.secret 必须是非空字符串');
+    else out.secret = secret.trim();
+  }
+
+  const ports = raw['ports'];
+  if (ports !== undefined && ports !== null) {
+    if (!Array.isArray(ports)) {
+      problems.push('controller.ports 必须是端口号数组（如 [9191]）');
+    } else {
+      for (const item of ports) {
+        const port = typeof item === 'string' ? Number(item) : item;
+        if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) {
+          problems.push(`controller.ports 含非法端口：${JSON.stringify(item)}（应为 1–65535 的整数）`);
+          continue;
+        }
+        if (!out.ports.includes(port)) out.ports.push(port);
+      }
+    }
+  }
+
+  return out;
+}
+
 function normalizeSchedule(raw: unknown, problems: string[]): ScheduleSettings {
   if (raw === undefined || raw === null) return { ...DEFAULT_SCHEDULE };
   if (!isPlainObject(raw)) {
@@ -404,6 +483,7 @@ export function loadConfig(explicitPath?: string): AfcConfig {
   }
 
   const probe = normalizeProbeSettings(rawDoc['probe'], problems);
+  const controller = normalizeController(rawDoc['controller'], problems);
   const schedule = normalizeSchedule(rawDoc['schedule'], problems);
 
   let targets: TargetConfig[];
@@ -439,7 +519,7 @@ export function loadConfig(explicitPath?: string): AfcConfig {
 
   if (problems.length > 0) throw new ConfigError(problems);
 
-  const config: AfcConfig = { probe, schedule, targets };
+  const config: AfcConfig = { probe, schedule, controller, targets };
   if (path) config.sourcePath = path;
   return config;
 }

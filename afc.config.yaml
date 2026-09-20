@@ -17,6 +17,22 @@ probe:
   # 运行时配置路径；省略时自动发现。
   # runtimeConfigPath: ~/Library/Application Support/mihomo-party/work/config.yaml
 
+# 内核控制端点（afc 用它来读代理组、切换节点）。省略时自动发现，通常不用写。
+#
+# 注意：这里要的是客户端的「外部控制地址」，不是「混合/HTTP/SOCKS 代理端口」——
+# 代理端口是给浏览器和系统代理用的，跟 afc 无关。
+#   Clash Verge Rev：设置 → Clash 设置 → 外部控制（默认 127.0.0.1:9097）
+#   Clash Party：内核设置 → 外部控制地址 / 外部控制访问密钥
+controller:
+  # 显式指定端点，支持三种写法；写在这里定时任务也能用上。
+  # endpoint: 127.0.0.1:9097
+  # endpoint: unix:/tmp/mihomo-party-502-609.sock
+  # endpoint: pipe:\\.\pipe\MihomoParty\mihomo
+  # 控制端点的密钥（客户端的「外部控制访问密钥」）。省略时从客户端运行时配置里读。
+  # secret: your-secret
+  # 自动发现时额外要试的控制端口（例如你把外部控制地址改成了 9191）。
+  # ports: [9191]
+
 schedule:
   # 计划任务的运行间隔（秒）。越小恢复越快，但探测流量与触发机场风控的概率越高。
   intervalSeconds: 300

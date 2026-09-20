@@ -141,12 +141,29 @@ afc groups --controller 127.0.0.1:9097 --secret <密钥>            # 开了 ext
 
   Windows 上还有两个容易踩的点：
 
+  - **「代理端口」和「控制端口」是两回事**（最常见的误判）。混合/HTTP/SOCKS 代理端口是给浏览器与
+    系统代理用的，改成什么都与 afc 无关；afc 要的是客户端设置里单独那一项：
+    Clash Verge Rev 在「设置 → Clash 设置 → 外部控制」（默认 `127.0.0.1:9097`），
+    Clash Party 在「内核设置 → 外部控制地址 / 外部控制访问密钥」。
+    如果把代理端口改成了 afc 会去试的端口（比如 9090），afc 收到的就是代理端口对 `/version`
+    回的 `400 Bad Request`，表现为「找到了候选但都无法访问」——1.1.2 起这种应答会被直接点名。
   - **Clash Verge Rev 新版默认不开 TCP 端口**，控制端点挂在命名管道
     `\\.\pipe\verge-mihomo-sidecar-<release|dev>-<当前用户 SID 的 sha256>` 上（名字和随机
     `secret` 都写在 `%APPDATA%\io.github.clash-verge-rev.clash-verge-rev\config.yaml` 里）。
     afc 会读那份配置，也会自己按你的 SID 算出管道名，一般不用手动指定。
   - **Clash Party 的管道是「子目录」形式** `\\.\pipe\MihomoParty\mihomo`，不是 `\\.\pipe\mihomo-party`；
     内核还可能以服务身份（SYSTEM）运行，此时读不到命令行，afc 会改用镜像名 + 内核实际监听的端口来找。
+
+- **改过控制端口**：把它写进 `afc.config.yaml`，定时任务也会用上（定时任务不带任何端点参数）：
+
+```yaml
+controller:
+  endpoint: 127.0.0.1:9191        # 也可写 unix:/path.sock 或 pipe:\\.\pipe\MihomoParty\mihomo
+  secret: your-secret             # 省略时从客户端自己的运行时配置里读
+  ports: [9191]                   # 只写了端口：自动发现时额外试这些端口
+```
+
+  优先级：`--controller` / `--secret`（命令行）> `controller.*`（配置文件）> 自动发现。
 
 - **多个订阅**：afc 跟着**当前生效的订阅**走 —— 切订阅是客户端的事，不用在 afc 里切。
   两个订阅的组名不一样也能自动认（例如一个叫 `GPT`、另一个叫 `🤖AI网站`）。

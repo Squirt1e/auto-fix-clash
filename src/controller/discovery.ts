@@ -37,6 +37,8 @@ export interface EndpointAttempt {
   /** 候选是怎么来的（运行时配置 / 内核进程 / 管道枚举 …），排查时最关键的一列。 */
   source: string;
   error: string;
+  /** 这个端口的应答像是「代理端口」而不是「控制端口」。 */
+  proxyPortLike?: boolean;
 }
 
 /** 显式端点失败时，顺手发现的可用端点。 */
@@ -109,6 +111,8 @@ export interface DiscoverOptions {
   budgetMs?: number;
   /** 显式指定运行时配置路径（用于读取 external-controller 与 secret）。 */
   runtimeConfigPath?: string;
+  /** 用户在 afc 配置里声明的控制端口（客户端改过「外部控制地址」的端口时用）。 */
+  configuredPorts?: readonly number[];
   /** 额外注入的候选（测试用）。 */
   extraCandidates?: ControllerEndpoint[];
 }
@@ -222,7 +226,7 @@ function collectConfigCandidates(
 }
 
 /**
- * 只做「便宜的那部分」发现：读已知数据目录里的运行时配置。
+ * 只做「便宜的那部分」发现：读已知数据目录里的运行时配置，外加配置里声明的端口。
  *
  * 存在的意义是延迟：Windows 上枚举进程/端口/管道要启子进程（实测 CI 上十几秒），
  * 而绝大多数用户的控制端点就写在自己的运行时配置里 —— 先试这一层，
@@ -238,7 +242,25 @@ export function cheapPlan(
   for (const configPath of staticRuntimeConfigPaths(options.runtimeConfigPath, ctx)) {
     collectConfigCandidates(configPath, options, facts, push);
   }
+  for (const port of configuredPorts(options)) {
+    push({
+      kind: 'tcp',
+      host: '127.0.0.1',
+      port,
+      source: '配置里的控制端口',
+      ...(options.secret ? { secret: options.secret } : {}),
+    });
+  }
   return { candidates, facts };
+}
+
+/** 配置里声明的控制端口（去重、去非法值）。 */
+function configuredPorts(options: DiscoverOptions): number[] {
+  const ports: number[] = [];
+  for (const port of options.configuredPorts ?? []) {
+    if (Number.isInteger(port) && port > 0 && port <= 65535 && !ports.includes(port)) ports.push(port);
+  }
+  return ports;
 }
 
 /** 发现过程中看到的事实，用于诊断输出与报错提示。 */
@@ -303,7 +325,12 @@ export function planDiscovery(
     collectConfigCandidates(configPath, options, facts, push);
   }
 
+  // 用户自己声明的控制端口比「猜默认值」可信，排在猜测之前
   const fallbackSecret = options.secret ?? facts.configSecret;
+  for (const port of configuredPorts(options)) {
+    push({ kind: 'tcp', host: '127.0.0.1', port, source: '配置里的控制端口', ...(fallbackSecret ? { secret: fallbackSecret } : {}) });
+  }
+
   for (const proc of processes) {
     if (proc.unixSocket) {
       push({ kind: 'unix', path: proc.unixSocket, source: `内核进程 ${proc.pid} 的 -ext-ctl-unix`, ...(fallbackSecret ? { secret: fallbackSecret } : {}) });
@@ -400,6 +427,25 @@ interface AttemptResult {
   budgetExhausted: boolean;
 }
 
+/**
+ * 把一次探测失败翻译成人能看懂的说明。
+ *
+ * 最值得一提的是「代理端口」：客户端界面上的混合/HTTP 端口长得就像个控制端口，
+ * 用户很容易把它填给 afc。Go 的代理端口对非代理请求（例如 GET /version）会回
+ * 400 Bad Request 且响应体为空 —— 这是它的签名，可以据此给出明确指引。
+ */
+function classifyFailure(endpoint: ControllerEndpoint, err: unknown): { message: string; proxyPortLike?: boolean } {
+  if (err instanceof NotMihomoError) return { message: '不是 mihomo 控制端点' };
+  if (endpoint.kind === 'tcp' && err instanceof HttpError && err.status === 400) {
+    return {
+      message: 'GET /version 返回 HTTP 400 且响应体为空 —— 这个端口像是「代理端口」，不是控制端口'
+        + '（混合/HTTP 代理口的非代理请求正是这么回的）',
+      proxyPortLike: true,
+    };
+  }
+  return { message: (err as Error).message };
+}
+
 /** 依次尝试候选端点，返回第一个确认是 mihomo 的端点。 */
 async function attemptEndpoints(
   candidates: readonly ControllerEndpoint[],
@@ -423,8 +469,13 @@ async function attemptEndpoints(
       return { found: { endpoint, version: info.version, client }, attempts, sawUnauthorized, budgetExhausted: false };
     } catch (err) {
       if (err instanceof UnauthorizedError) sawUnauthorized = true;
-      const message = err instanceof NotMihomoError ? '不是 mihomo 控制端点' : (err as Error).message;
-      attempts.push({ endpoint: describeEndpoint(endpoint), source: endpoint.source, error: message });
+      const failure = classifyFailure(endpoint, err);
+      attempts.push({
+        endpoint: describeEndpoint(endpoint),
+        source: endpoint.source,
+        error: failure.message,
+        ...(failure.proxyPortLike ? { proxyPortLike: true } : {}),
+      });
       if (err instanceof HttpError && err.status === 401) sawUnauthorized = true;
     }
   }
@@ -462,7 +513,7 @@ export async function discoverController(
     throw new ControllerDiscoveryError(
       result.sawUnauthorized ? 'unauthorized' : 'unreachable',
       result.attempts,
-      hintText(auto.facts, ctx),
+      hintText(auto.facts, ctx, result.attempts),
       alternative,
     );
   }
@@ -488,7 +539,7 @@ export async function discoverController(
   throw new ControllerDiscoveryError(
     first.sawUnauthorized || second.sawUnauthorized ? 'unauthorized' : 'unreachable',
     attempts,
-    [exhausted, hintText(plan.facts, ctx)].filter((v): v is string => Boolean(v)).join('\n'),
+    [exhausted, hintText(plan.facts, ctx, attempts)].filter((v): v is string => Boolean(v)).join('\n'),
   );
 }
 
@@ -515,23 +566,47 @@ async function tryEndpoint(endpoint: ControllerEndpoint, timeoutMs: number): Pro
 }
 
 /** 平台相关的排查提示。 */
-function hintText(facts: DiscoveryFacts, ctx: PlatformContext): string {
+function hintText(facts: DiscoveryFacts, ctx: PlatformContext, attempts: readonly EndpointAttempt[] = []): string {
   const lines: string[] = [];
+
+  // 「代理端口 ≠ 控制端口」是最高频的误解，而且症状很迷惑（报了端口不可访问），
+  // 所以一旦看到代理端口的签名就把两者的区别讲清楚。
+  const proxyPorts = attempts.filter((a) => a.proxyPortLike).map((a) => a.endpoint);
+  if (proxyPorts.length > 0) {
+    lines.push(
+      `${proxyPorts.join('、')} 应答的是「代理端口」，不是「控制端口」——这两个是不同用途的端口：`,
+      '  · 代理端口（混合/HTTP/SOCKS 端口）给浏览器与系统代理用，改成什么都与 afc 无关；',
+    );
+  }
+
   if (isWindows(ctx)) {
     lines.push(
-      'Windows 上这两个客户端默认都不监听 9090：',
-      '  · Clash Verge Rev：控制端点在命名管道 \\\\.\\pipe\\verge-mihomo-sidecar-<release|dev>-<hash>，',
-      '    名字与 secret 都写在运行时配置的 external-controller-pipe / secret 里；',
-      '  · Clash Party：控制端点是 \\\\.\\pipe\\MihomoParty\\mihomo，由内核的 -ext-ctl-pipe 指定。',
+      'Windows 上要找的是「外部控制地址」，它在客户端设置里单独一项：',
+      '  · Clash Verge Rev：设置 → Clash 设置 → 外部控制（默认 127.0.0.1:9097，也可以只靠命名管道）；',
+      '    同一页的「端口设置」（混合代理端口等）是代理端口，不是这个。',
+      '  · Clash Party：内核设置 → 外部控制地址 + 外部控制访问密钥；Windows 上默认走命名管道',
+      '    \\\\.\\pipe\\MihomoParty\\mihomo，改过端口的话记得重启内核。',
     );
     if (facts.runtimeConfigs.length === 0) {
-      lines.push('这次没有读到任何运行时配置：确认客户端的数据目录（%APPDATA%\\<客户端 id>\\config.yaml）存在，');
-      lines.push('或直接指定：--controller \'pipe:\\\\.\\pipe\\MihomoParty\\mihomo\' / --controller 127.0.0.1:9097');
-    } else if (facts.pipes.length === 0) {
-      lines.push('这次没有枚举到像 mihomo 的命名管道：内核可能没在运行（客户端退出后管道会消失）。');
+      lines.push('这次没有读到任何运行时配置：确认客户端的数据目录（%APPDATA%\\<客户端 id>\\config.yaml）存在。');
+    } else if (facts.pipes.length === 0 && facts.kernelProcesses.length === 0) {
+      lines.push('这次既没枚举到像 mihomo 的命名管道，也没找到内核进程：内核可能没在运行。');
     }
+  } else {
+    lines.push(
+      '要找的是「外部控制地址」（不是混合/HTTP/SOCKS 代理端口）：',
+      '  · Clash Verge Rev 默认 127.0.0.1:9097，Clash Party 用 Unix 套接字 /tmp/mihomo-party-<uid>-<pid>.sock。',
+    );
   }
-  lines.push('用 afc groups --verbose 可以看到「afc 到底找了哪些地方、每个候选源自哪里」。');
+
+  lines.push(
+    '改过控制端口的话，把它写进配置（定时任务也读这里）：',
+    '  controller:',
+    '    endpoint: 127.0.0.1:9097      # 或 unix:/path.sock、pipe:\\\\.\\pipe\\MihomoParty\\mihomo',
+    '    secret: <外部控制访问密钥>     # 省略则从客户端运行时配置里读',
+    '    ports: [9191]                 # 自动发现时额外要试的端口',
+    '用 afc groups --verbose 可以看到「afc 到底找了哪些地方、每个候选源自哪里」。',
+  );
   return lines.join('\n');
 }
 

@@ -88,6 +88,13 @@ const GROUPS_HELP = `用法：afc groups [选项]
   --controller 'pipe:\\\\.\\pipe\\verge-mihomo'                （Clash Verge 旧版的命名管道）
   --controller 127.0.0.1:9097 --secret <密钥>               （外部控制端口，Verge 默认 9097）
 
+也可以写进 afc.config.yaml（定时任务只读配置，不带命令行参数）：
+  controller:
+    endpoint: 127.0.0.1:9097
+    secret: <外部控制访问密钥>
+    ports: [9191]                 # 自动发现时额外要试的端口
+
+注意：这里要的是客户端的「外部控制地址」，不是「混合/HTTP/SOCKS 代理端口」。
 Windows 上 Clash Verge Rev 新版的管道名带用户 SID 哈希，写在运行时配置里，
 afc 会自动读它；也可以先用 afc groups --verbose 看 afc 找到了什么。
 `;

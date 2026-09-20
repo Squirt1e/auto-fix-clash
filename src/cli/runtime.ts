@@ -16,16 +16,31 @@ export interface Runtime {
   controller: DiscoveredController;
 }
 
+/**
+ * 把配置文件和命令行里的控制端点设置合成发现参数。
+ *
+ * 优先级：命令行 > 配置文件。配置文件这一层是必需的 —— 定时任务执行的是
+ * `afc fix --all --quiet --config <path>`，不带任何端点参数，用户改过控制端口时
+ * 只能靠 afc.config.yaml 里的 controller 段告诉它。
+ */
+export function resolveControllerOptions(
+  config: AfcConfig,
+  values: Record<string, unknown>,
+): DiscoverOptions {
+  const endpoint = optString(values, 'controller') ?? config.controller.endpoint;
+  const secret = optString(values, 'secret') ?? config.controller.secret;
+  return {
+    ...(endpoint ? { explicit: endpoint } : {}),
+    ...(secret ? { secret } : {}),
+    ...(config.controller.ports.length > 0 ? { configuredPorts: config.controller.ports } : {}),
+    ...(config.probe.runtimeConfigPath ? { runtimeConfigPath: config.probe.runtimeConfigPath } : {}),
+  };
+}
+
 /** 读取配置并发现控制端点。 */
 export async function openRuntime(context: CommandContext): Promise<Runtime> {
   const config = loadConfig(optString(context.values, 'config'));
-  const explicit = optString(context.values, 'controller');
-  const secret = optString(context.values, 'secret');
-  const options: DiscoverOptions = {
-    ...(explicit ? { explicit } : {}),
-    ...(secret ? { secret } : {}),
-    ...(config.probe.runtimeConfigPath ? { runtimeConfigPath: config.probe.runtimeConfigPath } : {}),
-  };
+  const options = resolveControllerOptions(config, context.values);
   try {
     const controller = await discoverController(options);
     return { config, controller };
