@@ -9,12 +9,16 @@ import {
 import {
   buildCreateArgs,
   buildTaskCommand,
+  SchtasksBackend,
   intervalToMinutes,
+  buildTaskAction,
   parseQueryCsv,
   parseScheduledTaskJson,
+  wscriptPath,
   TASK_NAME,
 } from '../src/schedule/schtasks.ts';
 import {
+  buildHiddenLauncherScript,
   scheduleCliArgs,
   scheduleLogDir,
   scheduleLogFiles,
@@ -120,6 +124,43 @@ test('schtasks：含空格的路径会被正确引用，并把日志交给 --log
   });
   assert.ok(command.startsWith('"C:\\Program Files\\nodejs\\node.exe"'), `含空格的 node 路径要加引号，实际：${command}`);
   assert.match(command, /--log-file/);
+});
+
+test('schtasks：默认用 wscript 隐藏启动器，任务不再弹控制台窗口', () => {
+  const options = { ...OPTIONS, nodePath: 'C:\\Program Files\\nodejs\\node.exe', logDir: 'C:\\afc\\logs' };
+  const launcher = 'C:\\afc\\logs\\run-hidden.vbs';
+  const action = buildTaskAction(options, launcher);
+  // 动作是 wscript.exe 拉起 .vbs（GUI 子系统 → 自己不开控制台）
+  assert.ok(action.includes('wscript.exe'), action);
+  assert.ok(action.includes(launcher), action);
+  // 没给启动器时退回直接执行（wscript 不可用的兜底）
+  assert.equal(buildTaskAction(options), buildTaskCommand(options));
+});
+
+test('隐藏启动器：内容是把真实命令包进 WScript.Shell.Run，窗口状态 0', () => {
+  const command = buildTaskCommand({
+    ...OPTIONS,
+    nodePath: 'C:\\Program Files\\nodejs\\node.exe',
+    cliPath: 'C:\\afc\\dist\\cli\\index.js',
+    logDir: 'C:\\afc\\logs',
+  });
+  const script = buildHiddenLauncherScript(command);
+  assert.match(script, /CreateObject\("WScript\.Shell"\)/);
+  // 双引号在 VBS 字符串里要成对出现
+  assert.ok(script.includes('""C:\\Program Files\\nodejs\\node.exe""'), script);
+  // 0 = 隐藏窗口；等待并把退出码带回任务计划程序（"上次运行结果"才有意义）
+  assert.match(script, /, 0, True/);
+  assert.match(script, /WScript\.Quit code/);
+  // 不带隐藏启动器时命令本身保持原样（POSIX / 兜底路径不受影响）
+  assert.ok(!buildTaskCommand(OPTIONS).includes('WScript'));
+});
+
+test('schtasks：wscript 路径走绝对路径，且启动器会出现在预览里', () => {
+  assert.match(wscriptPath(), /System32\\wscript\.exe$/i);
+  const preview = new SchtasksBackend(ctx('win32')).preview({ ...OPTIONS, logDir: 'C:\\afc\\logs' });
+  assert.match(preview, /隐藏启动器/);
+  assert.match(preview, /run-hidden\.vbs/);
+  assert.match(preview, /wscript/);
 });
 
 test('schtasks：状态取自 PowerShell 的结构化输出（与系统语言无关）', () => {

@@ -1,10 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { currentPlatform, type PlatformContext } from '../platform.ts';
 import {
+  buildHiddenLauncherScript,
   SCHEDULE_MIN_INTERVAL_SECONDS,
   scheduleCliArgs,
+  scheduleLauncherPath,
   scheduleLogDir,
   scheduleLogFiles,
   type InstallResult,
@@ -48,13 +50,32 @@ export function buildTaskCommand(options: ScheduleOptions): string {
   return [options.nodePath, options.cliPath, ...args].map(quoteForWindows).join(' ');
 }
 
+/**
+ * 计划任务实际执行的动作。
+ *
+ * 默认走 wscript + .vbs 隐藏启动器：`schtasks` 的交互式任务会为用户会话创建控制台窗口，
+ * 而 `node.exe` 是控制台程序，于是每 5 分钟弹一次窗。wscript 是 GUI 子系统程序，
+ * 自己不开控制台，再由它把子进程的窗口状态设为隐藏。
+ * wscript 不可用（被安全策略禁用）时退回直接执行，并如实告知会有窗口闪现。
+ */
+export function buildTaskAction(options: ScheduleOptions, launcherPath?: string): string {
+  if (!launcherPath) return buildTaskCommand(options);
+  return `${quoteForWindows(wscriptPath())} ${quoteForWindows(launcherPath)}`;
+}
+
+/** wscript.exe 的位置（用绝对路径，免得依赖 PATH）。 */
+export function wscriptPath(): string {
+  const root = process.env['SystemRoot'] ?? 'C:\\Windows';
+  return `${root}\\System32\\wscript.exe`;
+}
+
 /** schtasks /Create 的参数（纯函数）。 */
-export function buildCreateArgs(options: ScheduleOptions): string[] {
+export function buildCreateArgs(options: ScheduleOptions, launcherPath?: string): string[] {
   const minutes = intervalToMinutes(options.intervalSeconds);
   return [
     '/Create',
     '/TN', TASK_NAME,
-    '/TR', buildTaskCommand(options),
+    '/TR', buildTaskAction(options, launcherPath),
     '/SC', 'MINUTE',
     '/MO', String(minutes),
     '/F', // 已存在则覆盖，保证幂等
@@ -192,9 +213,13 @@ export class SchtasksBackend implements ScheduleBackend {
   }
 
   preview(options: ScheduleOptions): string {
-    return `# schtasks ${buildCreateArgs(options)
+    const launcher = scheduleLauncherPath(this.ctx, options.logDir);
+    return `# schtasks ${buildCreateArgs(options, launcher)
       .map((a) => (a.includes(' ') ? `"${a}"` : a))
-      .join(' ')}\n# 任务名：${TASK_NAME}\n# 日志：${scheduleLogFiles(this.ctx, options.logDir).out}\n`;
+      .join(' ')}\n# 任务名：${TASK_NAME}\n# 日志：${scheduleLogFiles(this.ctx, options.logDir).out}\n` +
+      `# 隐藏启动器：${launcher}\n` +
+      '# 启动器内容：wscript 拉起下面这条命令（窗口状态 0 = 隐藏，不会弹控制台）\n' +
+      `#   ${buildTaskCommand(options)}\n`;
   }
 
   async install(options: ScheduleOptions): Promise<InstallResult> {
@@ -203,11 +228,18 @@ export class SchtasksBackend implements ScheduleBackend {
 
     const replaced = (await queryTaskState()).installed;
 
-    const create = await schtasks(buildCreateArgs(options));
+    // 隐藏启动器：没有它，任务每跑一次都会在用户会话里闪一个控制台窗口
+    const launcher = scheduleLauncherPath(this.ctx, options.logDir);
+    const wscriptAvailable = existsSync(wscriptPath());
+    if (wscriptAvailable) {
+      writeFileSync(launcher, buildHiddenLauncherScript(buildTaskCommand(options)), 'utf8');
+    }
+
+    const create = await schtasks(buildCreateArgs(options, wscriptAvailable ? launcher : undefined));
     if (!create.ok) {
       throw new Error(
         `创建计划任务失败：${(create.err || create.out).trim() || '未知错误'}\n` +
-        `可以手动试一次：schtasks ${buildCreateArgs(options).join(' ')}`,
+        `可以手动试一次：schtasks ${buildCreateArgs(options, wscriptAvailable ? launcher : undefined).join(' ')}`,
       );
     }
 
@@ -217,20 +249,23 @@ export class SchtasksBackend implements ScheduleBackend {
     if (!verify.installed) {
       throw new Error(
         '任务创建后核验失败：schtasks 报告成功，但查不到该任务。\n' +
-        `可以手动试一次：schtasks ${buildCreateArgs(options).join(' ')}`,
+        `可以手动试一次：schtasks ${buildCreateArgs(options, wscriptAvailable ? launcher : undefined).join(' ')}`,
       );
     }
 
     const run = await schtasks(['/Run', '/TN', TASK_NAME]);
     const stateText = verify.state ? `（状态 ${verify.state}）` : '';
+    const hiddenText = wscriptAvailable
+      ? '，静默运行（不弹窗口）'
+      : '；注意：本机 wscript 不可用，任务运行时会有窗口闪现';
     return {
       backend: this.name,
-      definitions: [],
+      definitions: wscriptAvailable ? [launcher] : [],
       loaded: true,
       replaced,
       message: run.ok
-        ? `已创建计划任务并核验存在${stateText}，已立即试跑一次。`
-        : `已创建计划任务并核验存在${stateText}；试跑失败：${run.err.trim()}`,
+        ? `已创建计划任务并核验存在${stateText}${hiddenText}，已立即试跑一次。`
+        : `已创建计划任务并核验存在${stateText}${hiddenText}；试跑失败：${run.err.trim()}`,
       logPath: scheduleLogFiles(this.ctx, options.logDir).out,
     };
   }
@@ -240,6 +275,15 @@ export class SchtasksBackend implements ScheduleBackend {
     const stillThere = (await queryTaskState()).installed;
     const removed: string[] = [];
     if (del.ok && !stillThere) removed.push(`计划任务 ${TASK_NAME}`);
+    const launcher = scheduleLauncherPath(this.ctx);
+    if (existsSync(launcher)) {
+      try {
+        rmSync(launcher, { force: true });
+        removed.push(launcher);
+      } catch {
+        // 删不掉不影响卸载结论
+      }
+    }
     if (removeLogs) {
       const dir = scheduleLogDir(this.ctx);
       if (existsSync(dir)) {

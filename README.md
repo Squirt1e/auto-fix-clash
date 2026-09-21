@@ -48,7 +48,7 @@ afc schedule uninstall    # 不会改动你的任何 Clash 配置
 |---|---|---|
 | macOS | launchd | 系统设置 → 通用 → 登录项与扩展 |
 | Linux | systemd 用户定时器（没有 systemd 时自动退回 cron） | `systemctl --user list-timers afc-heal.timer` |
-| Windows | 任务计划程序 | 任务计划程序里名为 `auto-fix-clash-heal` 的任务 |
+| Windows | 任务计划程序 | 任务计划程序里名为 `auto-fix-clash-heal` 的任务（经 `wscript` + 隐藏启动器运行，不弹窗口） |
 
 需要强制指定后端（例如容器里没有 systemd）：
 
@@ -202,6 +202,12 @@ afc 会按顺序找：正在运行的内核进程 → **客户端主程序旁边
 probe:
   kernelPath: D:\tools\Clash Verge\verge-mihomo.exe
 ```
+
+**Windows 上每 5 分钟弹一个黑窗口？**
+1.2.3 起不会了：任务不再是直接跑控制台程序 `node.exe`，而是跑 `wscript.exe` + 由 afc 生成的
+`%LOCALAPPDATA%\afc\logs\run-hidden.vbs`，把窗口状态设为隐藏（启动器还会把 afc 的退出码回传给任务计划程序）。
+从旧版本升级后请重跑一次 `afc schedule install` 改写已有任务；若本机 `wscript` 被安全策略禁用，
+安装时会明确告诉你任务会有窗口闪现。
 
 **`afc schedule status` 说没安装，但我装过了？**
 1.2.2 起会给出**核验过**的状态：`install` 创建任务后会立刻回查一次，`status` 走的是 PowerShell 的

@@ -32,7 +32,7 @@ export const SCHEDULE_HELP = `用法：afc schedule <install|uninstall|status> [
   status      查看是否在运行、最近一次做了什么
 
 定时任务后端按平台自动选择：macOS 用 launchd、Linux 用 systemd 用户定时器
-（没有 systemd 时退回 cron）、Windows 用任务计划程序。
+（没有 systemd 时退回 cron）、Windows 用任务计划程序（后台静默运行，不弹窗口）。
 
 选项：
   --interval <seconds>   运行间隔，最小 60
