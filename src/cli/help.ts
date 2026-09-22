@@ -6,7 +6,7 @@ export const TOP_HELP = `afc — 让 Clash 代理组自动选中「真正能用�
   fix <域名|*.域名>              立即找出该网站经过的代理组并修复
   schedule add <域名|*.域名>     添加一个定时修复的网站
   schedule list                  查看已添加的网站
-  schedule remove <域名|*.域名>  移除一个网站
+  schedule remove <域名|序号>    按域名或 list 序号移除网站
   schedule install / status      安装定时任务 / 查看运行状态
   groups / doctor                查看代理组 / 体检节点
   add / remove <组名>            旧版按组配置（组名固定时使用）
@@ -31,7 +31,7 @@ export const SCHEDULE_HELP = `用法：afc schedule <add|list|remove|install|uni
 
   add <域名|*.域名>     登记一个定时修复范围（*. 同时包含裸域）
   list                  查看当前登记的域名
-  remove <域名|*.域名>  移除一个范围
+  remove <域名|序号>    按域名或 list 中的序号移除一个范围
   install     安装定时任务（默认每 300 秒运行一次 afc fix）
   uninstall   移除任务并删除本工具的日志
   status      查看是否在运行、最近一次做了什么

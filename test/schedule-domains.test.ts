@@ -50,6 +50,43 @@ test('schedule remove 会归一化域名并在删除末项后留下空数组', a
   }
 });
 
+test('schedule remove 能删除配置文件中展示的隐式默认域名', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'afc-schedule-remove-default-'));
+  const path = join(dir, 'config.yaml');
+  try {
+    writeFileSync(path, 'targets: []\n', 'utf8');
+    const listed = await captureRun(['list'], { config: path });
+    assert.match(listed.out, /1\. \*\.chatgpt\.com/);
+
+    const removed = await captureRun(['remove', '*.chatgpt.com'], { config: path });
+    assert.equal(removed.code, EXIT_OK);
+    assert.deepEqual(loadConfig(path).domains, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('schedule remove 接受列表序号并拒绝越界序号', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'afc-schedule-remove-index-'));
+  const path = join(dir, 'config.yaml');
+  try {
+    writeFileSync(path, 'domains:\n  - pattern: one.example\n  - pattern: two.example\ntargets: []\n', 'utf8');
+    const listed = await captureRun(['list'], { config: path });
+    assert.match(listed.out, /1\. one\.example/);
+    assert.match(listed.out, /2\. two\.example/);
+
+    const removed = await captureRun(['remove', '2'], { config: path });
+    assert.equal(removed.code, EXIT_OK);
+    assert.deepEqual(loadConfig(path).domains.map((target) => target.pattern), ['one.example']);
+
+    const outOfRange = await captureRun(['remove', '2'], { config: path });
+    assert.equal(outOfRange.code, EXIT_USAGE);
+    assert.match(outOfRange.err, /序号 2 不存在/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('schedule add 拒绝重复域名和不成对的探测参数', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'afc-schedule-invalid-'));
   const path = join(dir, 'config.yaml');

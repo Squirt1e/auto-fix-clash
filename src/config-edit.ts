@@ -128,6 +128,19 @@ export function addDomainToConfigText(
   return addBlocksToSection(text, 'domains', targets.map(renderDomainBlock));
 }
 
+/** 把尚未写入文件的默认域名显式化，通常用于删除默认项后的剩余列表。 */
+export function materializeDomainsInConfigText(
+  text: string,
+  targets: readonly DomainTargetConfig[],
+): string {
+  if (text.split('\n').some((line) => /^domains:/.test(line))) return text;
+  if (targets.length === 0) {
+    const base = text.replace(/\s*$/, '');
+    return `${base}${base === '' ? '' : '\n\n'}domains: []\n`;
+  }
+  return addBlocksToSection(text, 'domains', targets.map(renderDomainBlock));
+}
+
 export function removeDomainFromConfigText(text: string, requestedPattern: string): string | undefined {
   const wanted = parseDomainPattern(requestedPattern).input;
   const lines = text.split('\n');

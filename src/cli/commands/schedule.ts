@@ -2,7 +2,12 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_SCHEDULE, loadConfig } from '../../config.ts';
-import { addDomainToConfigText, removeDomainFromConfigText, writeConfigText } from '../../config-edit.ts';
+import {
+  addDomainToConfigText,
+  materializeDomainsInConfigText,
+  removeDomainFromConfigText,
+  writeConfigText,
+} from '../../config-edit.ts';
 import { UsageError } from '../../errors.ts';
 import { EXIT_OK, EXIT_USAGE } from '../../exit-codes.ts';
 import { afcStateDir, currentPlatform, joinFor, type PlatformContext } from '../../platform.ts';
@@ -252,9 +257,9 @@ function handleDomainAction(
     const config = loadConfig(explicit);
     process.stdout.write(`定时修复域名（${config.sourcePath ?? '内置默认'}）：\n`);
     if (config.domains.length === 0) process.stdout.write('  没有登记任何域名。\n');
-    for (const target of config.domains) {
+    for (const [index, target] of config.domains.entries()) {
       const source = target.probe ? '显式/服务判据' : '通用 HTTPS 可达性';
-      process.stdout.write(`  - ${target.pattern}（${source}）\n`);
+      process.stdout.write(`  ${index + 1}. ${target.pattern}（${source}）\n`);
     }
     if (config.sourcePath) emitInstalledConfigWarning(currentPlatform(), config.sourcePath);
     return EXIT_OK;
@@ -286,10 +291,26 @@ function handleDomainAction(
   const config = loadConfig(explicit);
   if (!config.sourcePath) throw new UsageError('当前域名来自内置默认，尚无可编辑配置文件。');
   const text = readFileSync(config.sourcePath, 'utf8');
-  const next = removeDomainFromConfigText(text, rawPattern);
-  if (next === undefined) throw new UsageError(`配置中没有登记 “${parseDomainPattern(rawPattern).input}”。`);
+  const numericSelector = /^\d+$/.test(rawPattern);
+  const index = numericSelector ? Number(rawPattern) - 1 : -1;
+  if (numericSelector && (!Number.isSafeInteger(index) || index < 0 || index >= config.domains.length)) {
+    throw new UsageError(`域名序号 ${rawPattern} 不存在，请先运行 afc schedule list。`);
+  }
+  const wanted = numericSelector
+    ? config.domains[index]!.pattern
+    : parseDomainPattern(rawPattern).input;
+  let next = removeDomainFromConfigText(text, wanted);
+  if (next === undefined && !/^domains:/m.test(text)) {
+    const remaining = config.domains.filter(
+      (target) => parseDomainPattern(target.pattern).input !== wanted,
+    );
+    if (remaining.length !== config.domains.length) {
+      next = materializeDomainsInConfigText(text, remaining);
+    }
+  }
+  if (next === undefined) throw new UsageError(`配置中没有登记 “${wanted}”。`);
   writeConfigText(config.sourcePath, next);
   emitInstalledConfigWarning(currentPlatform(), config.sourcePath);
-  process.stdout.write(`已移除定时修复域名：${parseDomainPattern(rawPattern).input}\n  配置：${config.sourcePath}\n`);
+  process.stdout.write(`已移除定时修复域名：${wanted}\n  配置：${config.sourcePath}\n`);
   return EXIT_OK;
 }
