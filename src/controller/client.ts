@@ -21,6 +21,21 @@ export interface VersionInfo {
   version: string;
 }
 
+export interface MihomoRule {
+  index: number;
+  type: string;
+  payload: string;
+  proxy: string;
+  size: number;
+  extra?: {
+    disabled?: boolean;
+    hitCount?: number;
+    hitAt?: string;
+    missCount?: number;
+    missAt?: string;
+  };
+}
+
 export const GROUP_TYPES = new Set(['Selector', 'URLTest', 'Fallback', 'LoadBalance', 'Relay', 'Smart']);
 
 /** 内置策略类型：既不是代理组，也不是可拨号的真实节点。 */
@@ -94,6 +109,11 @@ export class MihomoClient {
   async proxies(): Promise<Record<string, ProxyInfo>> {
     const res = await this.call<{ proxies: Record<string, ProxyInfo> }>('GET', '/proxies');
     return res.proxies ?? {};
+  }
+
+  async rules(): Promise<MihomoRule[]> {
+    const res = await this.call<{ rules: MihomoRule[] }>('GET', '/rules');
+    return Array.isArray(res.rules) ? res.rules : [];
   }
 
   async proxy(name: string): Promise<ProxyInfo> {
