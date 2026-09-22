@@ -1,9 +1,12 @@
-import { realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../../config.ts';
+import { addDomainToConfigText, removeDomainFromConfigText, writeConfigText } from '../../config-edit.ts';
+import { UsageError } from '../../errors.ts';
 import { EXIT_OK, EXIT_USAGE } from '../../exit-codes.ts';
 import { currentPlatform } from '../../platform.ts';
+import { DEFAULT_DOMAIN_TARGETS, parseDomainPattern, type DomainTargetConfig } from '../../targets/domain.ts';
 import {
   BACKEND_CHOICES,
   defaultBackendName,
@@ -15,6 +18,7 @@ import {
 } from '../../schedule/index.ts';
 import { SCHEDULE_HELP } from '../help.ts';
 import { optBoolean, optNumber, optString, type CommandContext } from '../context.ts';
+import { parseExpectedStatus, resolveWritePath } from './add.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -52,6 +56,15 @@ function inspectHint(platform: string): string {
 export async function run(context: CommandContext): Promise<number> {
   const action = context.positionals[0] ?? 'status';
   const ctx = currentPlatform();
+
+  if (action === 'add' || action === 'remove' || action === 'list') {
+    try {
+      return handleDomainAction(action, context);
+    } catch (err) {
+      process.stderr.write(`${(err as Error).message}\n`);
+      return EXIT_USAGE;
+    }
+  }
 
   const rawChoice = optString(context.values, 'backend') ?? 'auto';
   if (!isBackendChoice(rawChoice)) {
@@ -91,7 +104,8 @@ export async function run(context: CommandContext): Promise<number> {
         `  运行日志：${result.logPath}\n` +
         `  ${result.message}\n` +
         inspectHint(ctx.platform) +
-        '  处理范围：配置里声明的组 + 你在 Clash 里手动钉了节点的组\n' +
+        `  处理范围：${config.domains.map((target) => target.pattern).join('、') || '（无）'}\n` +
+        '  升级旧任务后请重跑本命令，以替换原来的 fix --all --quiet。\n' +
         '  卸载：afc schedule uninstall（不修改任何 Clash 配置）\n',
       );
       return EXIT_OK;
@@ -124,6 +138,8 @@ export async function run(context: CommandContext): Promise<number> {
         `${status.intervalSeconds === undefined ? '' : `，每 ${status.intervalSeconds} 秒`}\n` +
         (status.lastLogLine ? `  最近一次：${status.lastLogLine}\n` : '  还没有运行记录。\n'),
       );
+      const config = loadConfig(optString(context.values, 'config'));
+      process.stdout.write(`  域名范围：${config.domains.map((target) => target.pattern).join('、') || '（无）'}\n`);
       if (!status.loaded) {
         process.stdout.write('  请重新执行 afc schedule install 以载入任务。\n');
       }
@@ -144,4 +160,70 @@ export async function run(context: CommandContext): Promise<number> {
       process.stderr.write(`未知的 schedule 子命令：${action}\n\n${SCHEDULE_HELP}`);
       return EXIT_USAGE;
   }
+}
+
+function domainTargetFromContext(pattern: string, context: CommandContext): DomainTargetConfig {
+  const normalized = parseDomainPattern(pattern).input;
+  const url = optString(context.values, 'url');
+  const expect = optString(context.values, 'expect');
+  if ((url === undefined) !== (expect === undefined)) {
+    throw new UsageError('--url 与 --expect 必须同时提供。');
+  }
+  const countryDeny = (optString(context.values, 'country-deny') ?? '')
+    .split(',').map((country) => country.trim().toUpperCase()).filter(Boolean);
+  return {
+    pattern: normalized,
+    ...(url && expect ? { probe: { url, expectedStatus: parseExpectedStatus(expect) } } : {}),
+    extraProbes: [],
+    countryAllow: [],
+    countryDeny,
+  };
+}
+
+function handleDomainAction(
+  action: 'add' | 'remove' | 'list',
+  context: CommandContext,
+): number {
+  const explicit = optString(context.values, 'config');
+  if (action === 'list') {
+    const config = loadConfig(explicit);
+    process.stdout.write(`定时修复域名（${config.sourcePath ?? '内置默认'}）：\n`);
+    if (config.domains.length === 0) process.stdout.write('  没有登记任何域名。\n');
+    for (const target of config.domains) {
+      const source = target.probe ? '显式/服务判据' : '通用 HTTPS 可达性';
+      process.stdout.write(`  - ${target.pattern}（${source}）\n`);
+    }
+    return EXIT_OK;
+  }
+
+  const rawPattern = context.positionals[1];
+  if (!rawPattern) throw new UsageError(`用法：afc schedule ${action} <域名|*.域名>`);
+  if (context.positionals.length > 2) throw new UsageError(`afc schedule ${action} 一次只接受一个域名范围。`);
+
+  if (action === 'add') {
+    const target = domainTargetFromContext(rawPattern, context);
+    const path = resolveWritePath(explicit);
+    const fileExists = existsSync(path);
+    const text = fileExists ? readFileSync(path, 'utf8') : '';
+    const existing = fileExists ? loadConfig(path).domains : DEFAULT_DOMAIN_TARGETS;
+    if (existing.some((item) => parseDomainPattern(item.pattern).input === target.pattern)) {
+      throw new UsageError(`“${target.pattern}” 已经登记在定时修复列表中。`);
+    }
+    const materializeDefaults = !/^domains:/m.test(text);
+    writeConfigText(path, addDomainToConfigText(text, target, materializeDefaults));
+    process.stdout.write(
+      `已登记定时修复域名：${target.pattern}\n  配置：${path}\n` +
+      '如果系统任务已经安装，请重跑 afc schedule install 以确认它指向这份配置。\n',
+    );
+    return EXIT_OK;
+  }
+
+  const config = loadConfig(explicit);
+  if (!config.sourcePath) throw new UsageError('当前域名来自内置默认，尚无可编辑配置文件。');
+  const text = readFileSync(config.sourcePath, 'utf8');
+  const next = removeDomainFromConfigText(text, rawPattern);
+  if (next === undefined) throw new UsageError(`配置中没有登记 “${parseDomainPattern(rawPattern).input}”。`);
+  writeConfigText(config.sourcePath, next);
+  process.stdout.write(`已移除定时修复域名：${parseDomainPattern(rawPattern).input}\n  配置：${config.sourcePath}\n`);
+  return EXIT_OK;
 }

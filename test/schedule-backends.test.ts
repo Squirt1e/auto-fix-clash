@@ -42,10 +42,10 @@ const ctx = (platform: 'darwin' | 'linux' | 'win32'): PlatformContext => ({
   env: platform === 'win32' ? { APPDATA: 'C:\\Users\\tester\\AppData\\Roaming', LOCALAPPDATA: 'C:\\Users\\tester\\AppData\\Local' } : {},
 });
 
-test('scheduleCliArgs：固定跑 fix --all --quiet，按需带上配置文件与日志', () => {
-  assert.deepEqual(scheduleCliArgs(OPTIONS), ['fix', '--all', '--quiet']);
+test('scheduleCliArgs：固定跑 fix --scheduled --quiet，按需带上配置文件与日志', () => {
+  assert.deepEqual(scheduleCliArgs(OPTIONS), ['fix', '--scheduled', '--quiet']);
   assert.deepEqual(scheduleCliArgs({ ...OPTIONS, configPath: '/opt/afc/afc.config.yaml' }), [
-    'fix', '--all', '--quiet', '--config', '/opt/afc/afc.config.yaml',
+    'fix', '--scheduled', '--quiet', '--config', '/opt/afc/afc.config.yaml',
   ]);
   assert.deepEqual(scheduleCliArgs(OPTIONS, '/var/log/afc/heal.log').slice(-2), ['--log-file', '/var/log/afc/heal.log']);
 });
@@ -62,7 +62,8 @@ test('systemd service 单元包含工作目录、执行命令与日志重定向'
   assert.match(unit, /\[Service\]/);
   assert.match(unit, /Type=oneshot/);
   assert.match(unit, /WorkingDirectory=\/opt\/afc/);
-  assert.match(unit, /ExecStart=\/usr\/bin\/node \/opt\/afc\/src\/cli\/index\.ts fix --all --quiet/);
+  assert.match(unit, /ExecStart=\/usr\/bin\/node \/opt\/afc\/src\/cli\/index\.ts fix --scheduled --quiet/);
+  assert.doesNotMatch(unit, /fix --all --quiet/);
   assert.match(unit, /StandardOutput=append:\/var\/log\/afc\/heal\.log/);
   assert.match(unit, /StandardError=append:\/var\/log\/afc\/heal\.err\.log/);
 });
@@ -73,7 +74,7 @@ test('systemd service 会为含空格的路径加引号', () => {
     cliPath: '/Users/me/My Tools/src/cli/index.ts',
     workingDirectory: '/Users/me/My Tools',
   });
-  assert.match(unit, /ExecStart=\/usr\/bin\/node "\/Users\/me\/My Tools\/src\/cli\/index\.ts" fix --all --quiet/);
+  assert.match(unit, /ExecStart=\/usr\/bin\/node "\/Users\/me\/My Tools\/src\/cli\/index\.ts" fix --scheduled --quiet/);
 });
 
 test('systemd timer 单元带间隔与 Persistent', () => {
@@ -89,7 +90,8 @@ test('cron 兜底条目带标记、分钟换算与日志重定向', () => {
   assert.equal(lines[0], CRON_MARKER);
   assert.match(lines[1]!, /^\*\/5 \* \* \* \* /, '300 秒应换算成每 5 分钟');
   assert.match(lines[1]!, /cd "\/opt\/afc"/);
-  assert.match(lines[1]!, /fix --all --quiet/);
+  assert.match(lines[1]!, /fix --scheduled --quiet/);
+  assert.doesNotMatch(lines[1]!, /--force/);
   assert.match(lines[1]!, />> "\/var\/log\/afc\/heal\.log" 2>> "\/var\/log\/afc\/heal\.err\.log"/);
 });
 

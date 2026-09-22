@@ -73,7 +73,7 @@ test('afc <命令> --help 打印该命令的用法', async () => {
     ['groups', /用法：afc groups/],
     ['doctor', /用法：afc doctor/],
     ['fix', /用法：afc fix/],
-    ['schedule', /用法：afc schedule <install\|uninstall\|status>/],
+    ['schedule', /用法：afc schedule <add\|list\|remove\|install\|uninstall\|status>/],
   ];
   for (const [command, pattern] of cases) {
     const result = await capture([command, '--help']);

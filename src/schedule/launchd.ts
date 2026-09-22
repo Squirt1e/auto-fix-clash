@@ -5,12 +5,13 @@ import { join, posix } from 'node:path';
 import { promisify } from 'node:util';
 import { MIN_SCHEDULE_INTERVAL_SECONDS } from '../config.ts';
 import { currentPlatform, type PlatformContext } from '../platform.ts';
-import type {
-  InstallResult,
-  ScheduleBackend,
-  ScheduleOptions,
-  ScheduleStatus,
-  UninstallResult,
+import {
+  scheduleCliArgs,
+  type InstallResult,
+  type ScheduleBackend,
+  type ScheduleOptions,
+  type ScheduleStatus,
+  type UninstallResult,
 } from './types.ts';
 
 const execFileAsync = promisify(execFile);
@@ -56,8 +57,7 @@ export interface PlistOptions {
 
 /** 生成 launchd plist：一次性短命进程，按 StartInterval 触发。 */
 export function buildPlist(options: PlistOptions): string {
-  const args = [options.nodePath, options.cliPath, 'fix', '--all', '--quiet'];
-  if (options.configPath) args.push('--config', options.configPath);
+  const args = [options.nodePath, options.cliPath, ...scheduleCliArgs(options)];
   const argsXml = args
     .map((a) => `    <string>${xmlEscape(a)}</string>`)
     .join('\n');

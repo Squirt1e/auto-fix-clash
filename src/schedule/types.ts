@@ -16,7 +16,7 @@ export interface ScheduleOptions {
 
 /** 计划任务要执行的命令行参数（不含 node 与入口本身）。 */
 export function scheduleCliArgs(options: ScheduleOptions, logFile?: string): string[] {
-  const args = ['fix', '--all', '--quiet'];
+  const args = ['fix', '--scheduled', '--quiet'];
   if (options.configPath) args.push('--config', options.configPath);
   if (logFile) args.push('--log-file', logFile);
   return args;

@@ -25,8 +25,11 @@ export const TOP_HELP = `afc — 让 Clash 代理组自动选中「真正能用�
 查看某条命令的用法：afc <命令> --help　　卸载：afc schedule uninstall
 `;
 
-export const SCHEDULE_HELP = `用法：afc schedule <install|uninstall|status> [选项]
+export const SCHEDULE_HELP = `用法：afc schedule <add|list|remove|install|uninstall|status> [参数] [选项]
 
+  add <域名|*.域名>     登记一个定时修复范围（*. 同时包含裸域）
+  list                  查看当前登记的域名
+  remove <域名|*.域名>  移除一个范围
   install     安装定时任务（默认每 300 秒运行一次 afc fix）
   uninstall   移除任务并删除本工具的日志
   status      查看是否在运行、最近一次做了什么
@@ -38,10 +41,14 @@ export const SCHEDULE_HELP = `用法：afc schedule <install|uninstall|status> [
   --interval <seconds>   运行间隔，最小 60
   --backend <name>       强制指定后端：launchd | systemd | cron | schtasks
   --config <path>        指定配置文件（会写入任务，供后台运行时使用）
+  --url <地址>           add 时指定服务探测地址（必须同时给 --expect）
+  --expect <状态码>      add 时指定期望状态码或范围
+  --country-deny <列表>  add 时指定出口国家黑名单，如 HK,CN
   --dry-run              只展示将要写入的任务定义
   --verbose              额外打印任务定义路径与系统里显示的名字
 
-说明：任务只通过控制端点切换代理组的选中节点，不修改任何 Clash 配置。
+说明：任务每次都按当前规则重新解析域名所属的代理组，只通过控制端点切换选择，
+不修改任何 Clash 配置。升级旧版本后请重跑 install，替换旧的按组任务参数。
 `;
 
 export const ADD_HELP = `用法：afc add <组名|编号> [选项]

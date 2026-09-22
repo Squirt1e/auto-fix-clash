@@ -21,7 +21,7 @@ test('plist 包含标签、间隔、日志与工作目录', () => {
   assert.match(plist, /<key>RunAtLoad<\/key>\s*<true\/>/);
 });
 
-test('plist 的参数以 fix --all --quiet 运行', () => {
+test('plist 的参数以 fix --scheduled --quiet 运行', () => {
   const plist = buildPlist(baseOptions);
   const section = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(plist)?.[1];
   assert.ok(section, 'plist 中应有 ProgramArguments 数组');
@@ -30,7 +30,7 @@ test('plist 的参数以 fix --all --quiet 运行', () => {
     '/usr/local/bin/node',
     '/Users/x/auto-fix-clash/src/cli/index.ts',
     'fix',
-    '--all',
+    '--scheduled',
     '--quiet',
   ]);
 });
