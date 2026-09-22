@@ -57,6 +57,18 @@ test('--help 与 help 子命令输出用法', async () => {
   }
 });
 
+test('顶层帮助直接告诉用户如何添加、查看和修复网站', async () => {
+  const { out } = await capture(['--help']);
+  assert.match(out, /fix <域名\|\*\.域名>/);
+  assert.match(out, /schedule add <域名\|\*\.域名>/);
+  assert.match(out, /schedule list/);
+  assert.match(out, /schedule remove/);
+  assert.match(out, /afc schedule add '\*\.example\.com'/);
+  assert.match(out, /afc fix '\*\.chatgpt\.com' --force/);
+  assert.match(out, /旧版按组/);
+  assert.doesNotMatch(out, /配置里声明的组 \+ 你在 Clash 里手动钉了节点的组/);
+});
+
 test('顶层帮助保持精简（避免一次倒出所有细节）', async () => {
   const { out } = await capture(['--help']);
   const lines = out.trimEnd().split('\n').length;

@@ -3,23 +3,25 @@ export const TOP_HELP = `afc — 让 Clash 代理组自动选中「真正能用�
 
 用法：afc <命令> [选项]
 
-  schedule install   装一次，之后每 5 分钟自动体检并修复 ← 最常用
-  groups             当前订阅有哪些组、哪些会被处理
-  doctor             体检并打印判定表（不改动选择）
-  fix                把不可用的节点换掉（可用时什么都不做）
-  add <组名>         把某个组加入管理
-  remove <组名>      把某个组从配置里移除
+  fix <域名|*.域名>              立即找出该网站经过的代理组并修复
+  schedule add <域名|*.域名>     添加一个定时修复的网站
+  schedule list                  查看已添加的网站
+  schedule remove <域名|*.域名>  移除一个网站
+  schedule install / status      安装定时任务 / 查看运行状态
+  groups / doctor                查看代理组 / 体检节点
+  add / remove <组名>            旧版按组配置（组名固定时使用）
 
 常用选项：
-  --group <组名|编号>  只处理这个组    --dry-run   只看会怎么切，不写入
-  --json           机器可读输出         --verbose   打印诊断信息与判定依据
-  --config <path>  指定配置文件         --quiet     每次运行只留一行
-  -v, --version    显示版本             -h, --help  显示本帮助
-  --controller <端点>  --secret <密钥>  手动指定内核控制端点（认不到时用）
+  --dry-run  只看不切换　--config <path> 指定配置　--verbose / --quiet 控制输出
+  -v, --version 显示版本　-h, --help 显示帮助　--controller <端点> 手动指定控制端点
 
-处理范围：配置里声明的组 + 你在 Clash 里手动钉了节点的组。
-          指向 DIRECT/REJECT 的组、委托给「自动选择」的组不会被改。
-          用 afc groups --verbose 可逐组查看原因。
+添加网站并立即使用：
+  afc schedule add '*.example.com'
+  afc schedule list
+  afc fix '*.chatgpt.com' --force
+
+处理范围：*.example.com 同时包含裸域；每次按当前规则重新定位所有确认的代理组。
+          DIRECT/REJECT、自动选择组会跳过；无法确认的规则会明确报告为不完整。
 
 退出码：0 成功　2 未找到可用节点　3 环境故障　64 用法错误
 查看某条命令的用法：afc <命令> --help　　卸载：afc schedule uninstall
