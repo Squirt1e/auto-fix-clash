@@ -107,3 +107,23 @@ test('rankUsable 在耗时相同时保持原有相对顺序', () => {
   const ranked = rankUsable([result('A', 'ok', 200), result('B', 'ok', 200)]);
   assert.deepEqual(ranked.map((r) => r.node), ['A', 'B']);
 });
+
+test('--force 会忽略健康的当前节点并选择另一个可用节点', () => {
+  const plan = planRepair({
+    force: true,
+    current: 'A',
+    currentResult: result('A', 'ok', 100),
+    candidateResults: [result('B', 'ok', 300)],
+  });
+  assert.deepEqual({ action: plan.action, from: plan.from, to: plan.to }, {
+    action: 'switch', from: 'A', to: 'B',
+  });
+  assert.match(plan.reason, /强制/);
+});
+
+test('--force 没有其它可用节点时保持原选择', () => {
+  const plan = planRepair({ force: true, current: 'A', candidateResults: [] });
+  assert.equal(plan.action, 'no-candidate');
+  assert.equal(plan.from, 'A');
+  assert.match(plan.reason, /其它可用/);
+});

@@ -1,7 +1,7 @@
 import { findGroupName, type AfcConfig, type TargetConfig } from '../config.ts';
 import { isGroup, isRealNode, type MihomoClient, type ProxyInfo } from '../controller/client.ts';
 import { ProbeEngine } from '../probe/engine.ts';
-import type { NodeProbeResult } from '../probe/engine.ts';
+import type { NodeProbeResult, ProbePolicy } from '../probe/engine.ts';
 import { findNodeDefinitions, type NodeDefinitionSource } from '../paths.ts';
 import { UsageError } from '../errors.ts';
 import { planRepair, type RepairPlan } from './plan.ts';
@@ -51,8 +51,26 @@ export interface RepairOptions {
   client: MihomoClient;
   runtimeConfigPath?: string;
   dryRun?: boolean;
+  force?: boolean;
   onNotice?: (message: string) => void;
   /** 测试注入。 */
+  engineFactory?: (options: {
+    config: AfcConfig;
+    proxies: unknown[];
+    nodeNames: string[];
+  }) => Promise<ProbeEngine>;
+}
+
+export interface GroupRepairOptions {
+  config: AfcConfig;
+  groupName: string;
+  policies: ProbePolicy[];
+  client: MihomoClient;
+  knownProxies?: Record<string, ProxyInfo>;
+  runtimeConfigPath?: string;
+  dryRun?: boolean;
+  force?: boolean;
+  onNotice?: (message: string) => void;
   engineFactory?: (options: {
     config: AfcConfig;
     proxies: unknown[];
@@ -94,9 +112,6 @@ export function loadNodeDefinitions(
  */
 export async function repairTarget(options: RepairOptions): Promise<RepairOutcome> {
   const { config, target, client } = options;
-  const notice = options.onNotice ?? ((): void => {});
-  const engineFactory = options.engineFactory ?? defaultEngineFactory;
-
   const allProxies = await client.proxies();
   // 按主名/别名解析出当前订阅里真实存在的那个组
   const availableGroups = Object.entries(allProxies)
@@ -104,7 +119,32 @@ export async function repairTarget(options: RepairOptions): Promise<RepairOutcom
     .map(([name]) => name);
   const groupName = findGroupName(target, availableGroups);
   if (!groupName) throw new TargetGroupMissingError(target, availableGroups);
-  const groupInfo: ProxyInfo = allProxies[groupName]!;
+
+  return await repairGroup({
+    config,
+    groupName,
+    policies: [{ label: target.name, target, confidence: 'service' }],
+    client,
+    knownProxies: allProxies,
+    ...(options.runtimeConfigPath ? { runtimeConfigPath: options.runtimeConfigPath } : {}),
+    ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
+    ...(options.force === undefined ? {} : { force: options.force }),
+    ...(options.onNotice ? { onNotice: options.onNotice } : {}),
+    ...(options.engineFactory ? { engineFactory: options.engineFactory } : {}),
+  });
+}
+
+/** 对已经由路由解析器确认的 Selector 执行多判据粘性修复。 */
+export async function repairGroup(options: GroupRepairOptions): Promise<RepairOutcome> {
+  const { config, groupName, client, policies } = options;
+  const notice = options.onNotice ?? ((): void => {});
+  const engineFactory = options.engineFactory ?? defaultEngineFactory;
+  const allProxies = options.knownProxies ?? await client.proxies();
+  const groupInfo = allProxies[groupName];
+  if (!groupInfo || !isGroup(groupInfo)) {
+    throw new UsageError(`当前订阅里没有代理组 “${groupName}”。`);
+  }
+  if (groupInfo.type !== 'Selector') throw new GroupNotSwitchableError(groupName, groupInfo.type);
 
   const groupCandidates = (groupInfo.all ?? []).filter((name) => isRealNode(allProxies[name]));
   if (groupCandidates.length === 0) {
@@ -139,15 +179,17 @@ export async function repairTarget(options: RepairOptions): Promise<RepairOutcom
 
   try {
     let currentProbe: NodeProbeResult | undefined;
-    if (currentNodeIsCandidate) {
+    if (currentNodeIsCandidate && !options.force) {
       notice(`体检当前节点 ${currentNode} …`);
-      currentProbe = await engine.probeOne(currentNode, target, 0);
+      currentProbe = await engine.probePolicies(currentNode, policies, 0);
+    } else if (currentNodeIsCandidate && options.force) {
+      notice(`已要求强制更换 ${currentNode}，跳过当前节点并寻找其它可用候选。`);
     } else if (currentNode !== undefined) {
       notice(`当前选中成员 ${currentNode} 不是可探测的真实节点，将直接寻找可用候选。`);
     }
 
     if (currentProbe?.verdict === 'ok') {
-      const plan = planRepair({ current: currentNode, currentResult: currentProbe });
+      const plan = planRepair({ current: currentNode, currentResult: currentProbe, force: false });
       return {
         group: groupName,
         plan,
@@ -160,11 +202,11 @@ export async function repairTarget(options: RepairOptions): Promise<RepairOutcom
 
     const remaining = candidates.filter((name) => name !== currentNode);
     notice(
-      `当前节点不可用，按顺序筛查 ${remaining.length} 个候选节点` +
+      `${options.force ? '强制换点' : '当前节点不可用'}，按顺序筛查 ${remaining.length} 个候选节点` +
       `（并发上限 ${config.probe.concurrency}，筛查超时 ${config.probe.screenTimeoutMs}ms，找到可用即停止）…`,
     );
     const { result: chosen, screened, lastScreened } = remaining.length > 0
-      ? await engine.findFirstUsable(remaining, target, config.probe.screenTimeoutMs)
+      ? await engine.findFirstUsableForAll(remaining, policies, config.probe.screenTimeoutMs)
       : { screened: 0, lastScreened: undefined };
 
     const candidateResults: NodeProbeResult[] = chosen ? [chosen] : [];
@@ -172,18 +214,31 @@ export async function repairTarget(options: RepairOptions): Promise<RepairOutcom
       ...(currentNode === undefined ? {} : { current: currentNode }),
       ...(currentProbe ? { currentResult: currentProbe } : {}),
       candidateResults,
+      force: options.force ?? false,
     });
 
     if (plan.action === 'no-candidate' && lastScreened) {
       notice(`最后一个候选的失败原因：${lastScreened.node} — ${lastScreened.reason}`);
     }
 
-    if (plan.action === 'switch' && groupInfo.type !== 'Selector') {
-      throw new GroupNotSwitchableError(groupName, groupInfo.type);
-    }
-
     let applied = false;
     if (plan.action === 'switch' && plan.to && !options.dryRun) {
+      const latest = await client.proxy(groupName);
+      if (latest.now !== currentNode) {
+        return {
+          group: groupName,
+          plan: {
+            action: 'stale',
+            ...(currentNode === undefined ? {} : { from: currentNode }),
+            ...(latest.now === undefined ? {} : { to: latest.now }),
+            reason: `探测期间组选择已从 ${currentNode ?? '（无）'} 变为 ${latest.now ?? '（无）'}，为避免覆盖用户操作已取消切换`,
+          },
+          applied: false,
+          probedNodes: (currentProbe ? 1 : 0) + screened,
+          candidatesConsidered: candidates.length,
+          ...(currentProbe ? { currentProbe } : {}),
+        };
+      }
       await client.select(groupName, plan.to);
       applied = true;
     }
@@ -192,7 +247,7 @@ export async function repairTarget(options: RepairOptions): Promise<RepairOutcom
       group: groupName,
       plan,
       applied,
-      probedNodes: 1 + screened,
+      probedNodes: (currentProbe ? 1 : 0) + screened,
       candidatesConsidered: candidates.length,
       ...(currentProbe ? { currentProbe } : {}),
     };

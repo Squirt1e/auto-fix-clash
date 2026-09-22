@@ -23,6 +23,12 @@ export interface NodeProbeResult {
   attempts: number;
 }
 
+export interface ProbePolicy {
+  label: string;
+  target: TargetConfig;
+  confidence: 'service' | 'reachability';
+}
+
 export interface ProbeEngineOptions {
   config: AfcConfig;
   /** 节点定义来源（通常是运行时配置的 proxies 段）。 */
@@ -173,12 +179,90 @@ export class ProbeEngine {
     return { node, attempts: observation.attempts, ...toResult(decision, observation) };
   }
 
-  /** 探测多个节点，按配置的并发上限调度；返回顺序与输入一致。 */
+  private policyKey(policy: ProbePolicy): string {
+    const target = policy.target;
+    return JSON.stringify({
+      probe: target.probe,
+      extraProbes: target.extraProbes,
+      geoProbe: target.geoProbe,
+      countryAllow: target.countryAllow,
+      countryDeny: target.countryDeny,
+    });
+  }
+
+  async probePolicies(
+    node: string,
+    policies: ProbePolicy[],
+    channel = 0,
+    timeoutMs?: number,
+  ): Promise<NodeProbeResult> {
+    const distinct = new Map<string, ProbePolicy>();
+    for (const policy of policies) {
+      const key = this.policyKey(policy);
+      if (!distinct.has(key)) distinct.set(key, policy);
+    }
+    if (distinct.size === 0) {
+      throw new Error(`节点 ${node} 没有可执行的探测策略`);
+    }
+
+    const results: { policy: ProbePolicy; result: NodeProbeResult }[] = [];
+    for (const policy of distinct.values()) {
+      const result = await this.probeOne(
+        node,
+        policy.target,
+        channel,
+        timeoutMs === undefined ? {} : { timeoutMs },
+      );
+      results.push({ policy, result });
+      if (result.verdict !== 'ok') {
+        const attempts = results.reduce((sum, item) => sum + item.result.attempts, 0);
+        return { ...result, attempts, reason: `${policy.label}：${result.reason}` };
+      }
+    }
+
+    const attempts = results.reduce((sum, item) => sum + item.result.attempts, 0);
+    const slowest = results.reduce<NodeProbeResult | undefined>((current, item) =>
+      current === undefined || (item.result.ttfbMs ?? -1) > (current.ttfbMs ?? -1)
+        ? item.result
+        : current, undefined);
+    const first = results[0]!.result;
+    return {
+      ...first,
+      verdict: 'ok',
+      reason: `全部 ${results.length} 项判据通过：${results.map((item) => item.policy.label).join('、')}`,
+      attempts,
+      ...(slowest?.ttfbMs === undefined ? {} : { ttfbMs: slowest.ttfbMs }),
+    };
+  }
+
+  async probeAll(
+    node: string,
+    policies: ProbePolicy[],
+    channel?: number,
+    timeoutMs?: number,
+  ): Promise<NodeProbeResult>;
   async probeAll(
     nodes: string[],
     target: TargetConfig,
     onResult?: (result: NodeProbeResult, index: number) => void,
-  ): Promise<NodeProbeResult[]> {
+  ): Promise<NodeProbeResult[]>;
+  async probeAll(
+    nodeOrNodes: string | string[],
+    policiesOrTarget: ProbePolicy[] | TargetConfig,
+    channelOrResult?: number | ((result: NodeProbeResult, index: number) => void),
+    timeoutMs?: number,
+  ): Promise<NodeProbeResult | NodeProbeResult[]> {
+    if (typeof nodeOrNodes === 'string') {
+      return await this.probePolicies(
+        nodeOrNodes,
+        policiesOrTarget as ProbePolicy[],
+        typeof channelOrResult === 'number' ? channelOrResult : 0,
+        timeoutMs,
+      );
+    }
+    const nodes = nodeOrNodes;
+    const target = policiesOrTarget as TargetConfig;
+    const onResult = typeof channelOrResult === 'function' ? channelOrResult : undefined;
     const results: NodeProbeResult[] = new Array(nodes.length);
     let next = 0;
     const workerCount = Math.min(this.channels, Math.max(1, nodes.length));
@@ -237,6 +321,34 @@ export class ProbeEngine {
       // 用完整设置复核一次，避免把筛查阶段的宽松判定当成结论。
       const best = usable.sort((a, b) => (a.ttfbMs ?? Infinity) - (b.ttfbMs ?? Infinity))[0]!;
       const confirmed = await this.probeOne(best.node, target, 0);
+      if (confirmed.verdict === 'ok') return { result: confirmed, screened };
+      lastScreened = confirmed;
+    }
+
+    return { screened, ...(lastScreened ? { lastScreened } : {}) };
+  }
+
+  async findFirstUsableForAll(
+    nodes: string[],
+    policies: ProbePolicy[],
+    screenTimeoutMs = 5000,
+  ): Promise<{ result?: NodeProbeResult; screened: number; lastScreened?: NodeProbeResult }> {
+    const batchSize = Math.max(1, this.channels);
+    let screened = 0;
+    let lastScreened: NodeProbeResult | undefined;
+
+    for (let start = 0; start < nodes.length; start += batchSize) {
+      const batch = nodes.slice(start, start + batchSize);
+      const screenedBatch = await Promise.all(batch.map(async (node, index) => {
+        const result = await this.probePolicies(node, policies, index % this.channels, screenTimeoutMs);
+        screened += 1;
+        lastScreened = result;
+        return result;
+      }));
+      const usable = screenedBatch.filter((result) => result.verdict === 'ok');
+      if (usable.length === 0) continue;
+      const best = usable.sort((a, b) => (a.ttfbMs ?? Infinity) - (b.ttfbMs ?? Infinity))[0]!;
+      const confirmed = await this.probePolicies(best.node, policies, 0);
       if (confirmed.verdict === 'ok') return { result: confirmed, screened };
       lastScreened = confirmed;
     }

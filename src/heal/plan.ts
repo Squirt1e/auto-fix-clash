@@ -1,6 +1,6 @@
 import type { NodeProbeResult } from '../probe/engine.ts';
 
-export type RepairAction = 'keep' | 'switch' | 'no-candidate';
+export type RepairAction = 'keep' | 'switch' | 'no-candidate' | 'stale';
 
 export interface RepairPlan {
   action: RepairAction;
@@ -15,6 +15,7 @@ export interface RepairPlan {
 }
 
 export interface PlanInput {
+  force?: boolean;
   current?: string;
   /** 对当前选中成员的探测结果；未探测则为 undefined。 */
   currentResult?: NodeProbeResult;
@@ -53,9 +54,9 @@ function describeProbe(result: NodeProbeResult): string {
  *   3. 没有可用候选 → 不做改动
  */
 export function planRepair(input: PlanInput): RepairPlan {
-  const { current, currentResult } = input;
+  const { current, currentResult, force = false } = input;
 
-  if (current !== undefined && currentResult?.verdict === 'ok') {
+  if (!force && current !== undefined && currentResult?.verdict === 'ok') {
     return {
       action: 'keep',
       to: current,
@@ -67,7 +68,9 @@ export function planRepair(input: PlanInput): RepairPlan {
   const usable = rankUsable(input.candidateResults ?? []);
   const best = usable[0];
   if (best) {
-    const why = current === undefined
+    const why = force
+      ? '已要求强制更换当前节点'
+      : current === undefined
       ? '当前没有选中成员'
       : currentResult === undefined
         ? '当前选中成员不是可探测的真实节点'
@@ -85,7 +88,9 @@ export function planRepair(input: PlanInput): RepairPlan {
     action: 'no-candidate',
     ...(current === undefined ? {} : { from: current }),
     reason:
-      current === undefined
+      force && current !== undefined
+        ? `没有其它可用节点，保持当前选择 ${current}`
+        : current === undefined
         ? '没有可用候选节点'
         : `当前节点不可用（${currentResult?.reason ?? '无法探测'}），且没有其它可用候选节点`,
   };

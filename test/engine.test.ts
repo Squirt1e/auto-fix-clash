@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AfcConfig, TargetConfig } from '../src/config.ts';
 import { DEFAULT_SCHEDULE, DEFAULT_TARGETS } from '../src/config.ts';
-import { ProbeEngine } from '../src/probe/engine.ts';
+import { ProbeEngine, type ProbePolicy } from '../src/probe/engine.ts';
 import type { ProbeInstance } from '../src/probe/instance.ts';
 import { ProxyRequestError, type ProxyRequestOptions, type ProxyRequestResult } from '../src/probe/proxy-request.ts';
 
@@ -241,4 +241,57 @@ test('每个通道的出口选择互不干扰', async () => {
   assert.equal(egressByPort.get(ports[1]), 'B');
   assert.equal(results[0]!.verdict, 'country-policy');
   assert.equal(results[1]!.verdict, 'ok');
+});
+
+test('节点必须通过每一个不同的探测策略', async () => {
+  const { instance, selection, ports } = fakeInstance(1);
+  const chatTarget: TargetConfig = {
+    ...DEFAULT_TARGETS[0]!,
+    extraProbes: [],
+    countryAllow: [],
+    countryDeny: [],
+  };
+  const genericTarget: TargetConfig = {
+    name: 'example.com', aliases: [],
+    probe: { url: 'https://example.com/', expectedStatus: [200, 399] },
+    extraProbes: [], countryAllow: [], countryDeny: [],
+  };
+  const policies: ProbePolicy[] = [
+    { label: 'ChatGPT 服务', target: chatTarget, confidence: 'service' },
+    { label: 'generic example.com', target: genericTarget, confidence: 'reachability' },
+  ];
+  const engine = await ProbeEngine.create({
+    config: configWith(), proxies: [{}], nodeNames: ['A'],
+    instanceFactory: async () => instance,
+    transport: makeTransport(ports, selection, (_node, url) =>
+      url === CODEX ? { status: 405 } : { status: 403 }),
+  });
+  const result = await engine.probeAll('A', policies, 0);
+  await engine.close();
+  assert.equal(result.verdict, 'blocked');
+  assert.match(result.reason, /generic example\.com/);
+});
+
+test('完全相同的探测策略只执行一次', async () => {
+  const { instance, selection, ports } = fakeInstance(1);
+  let codexCalls = 0;
+  const target: TargetConfig = {
+    ...DEFAULT_TARGETS[0]!,
+    extraProbes: [],
+    countryAllow: [],
+    countryDeny: [],
+  };
+  const policy: ProbePolicy = { label: 'ChatGPT', target, confidence: 'service' };
+  const engine = await ProbeEngine.create({
+    config: configWith(), proxies: [{}], nodeNames: ['A'],
+    instanceFactory: async () => instance,
+    transport: makeTransport(ports, selection, (_node, url) => {
+      if (url === CODEX) codexCalls += 1;
+      return { status: url === CODEX ? 405 : 200 };
+    }),
+  });
+  const result = await engine.probeAll('A', [policy, policy], 0);
+  await engine.close();
+  assert.equal(result.verdict, 'ok');
+  assert.equal(codexCalls, 1);
 });

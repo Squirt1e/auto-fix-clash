@@ -12,7 +12,7 @@ function timestamp(): string {
     `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
 }
 
-function summarize(outcome: RepairOutcome, dryRun: boolean): string {
+export function summarize(outcome: RepairOutcome, dryRun: boolean): string {
   const { plan } = outcome;
   switch (plan.action) {
     case 'keep':
@@ -24,7 +24,9 @@ function summarize(outcome: RepairOutcome, dryRun: boolean): string {
       return `${outcome.group}：${dryRun ? '将切换' : '已切换'} ${plan.from ?? '（无）'} → ${plan.to}${note}`;
     }
     case 'no-candidate':
-      return `${outcome.group}：没有可用节点，未做改动`;
+      return `${outcome.group}：没有其它可用节点，未做改动`;
+    case 'stale':
+      return `${outcome.group}：选择已变化为 ${plan.to ?? '（无）'}，未覆盖用户操作`;
   }
 }
 
