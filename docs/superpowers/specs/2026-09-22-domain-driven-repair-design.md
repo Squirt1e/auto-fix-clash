@@ -1,0 +1,48 @@
+# Domain-driven repair
+
+## Intent and success criteria
+
+afc currently chooses work by proxy-group name. Group names change with subscriptions, so the stable user-facing target should instead be a domain or domain range. `afc fix '*.chatgpt.com'` must include both `chatgpt.com` and its subdomains, discover every proxy group it can **confirm** may handle that range under the current mihomo configuration, and repair each group once. A domain that falls through to `MATCH` must also be handled. `--force` must move to a different verified node even when the current node is healthy. Scheduled runs must use persisted domain targets and rediscover the routing on every run.
+
+The first release must not claim exhaustive routing when rule providers, GEOSITE, process conditions, or other opaque predicates make that impossible. It should repair independently confirmed groups, report the unresolved portion, and return a non-success status for an incomplete run. It must not rewrite mihomo rules or the user's Clash configuration.
+
+## Existing system and changes
+
+Today `src/cli/runtime.ts` expands group-based targets, `src/heal/repair.ts` probes candidate nodes in an isolated temporary mihomo instance, and `src/heal/plan.ts` keeps a healthy current node. The system scheduler runs `fix --all --quiet`; `src/config.ts` stores group-named targets. Keep the isolated probe engine and controller-only selection. Add a domain-target model and a route-resolution layer before repair. The group-centric commands and `targets` configuration remain readable for explicit legacy use, but scheduled work no longer auto-discovers all manually pinned groups.
+
+Component boundaries:
+
+- `domain-targets`: parse/normalize exact hosts and `*.` ranges; select a probe policy without depending on proxy-group names.
+- `route-resolver`: read the live controller's mode, ordered rules, and proxies; return confirmed group bindings, evidence, skips, and unresolved portions. It never switches a group.
+- `repair-coordinator`: deduplicate groups, combine the relevant domain probes per group, invoke the existing repair engine, and produce a per-domain/per-group report.
+- `schedule`: persist domain targets in afc configuration and execute the same coordinator each interval.
+
+## Domain target semantics
+
+`afc fix <host-or-pattern>` accepts a DNS host or a leading `*.` range. Normalize case, a trailing dot, and internationalized hostnames consistently; reject URLs, paths, arbitrary glob syntax, empty labels, and invalid hosts. `*.example.com` denotes the apex `example.com` **and** every subdomain. Shell examples must quote the asterisk. A concrete host has one routing question; a wildcard represents a set, not a finite list of hosts.
+
+`afc fix` without a positional target runs the persisted domain targets. Built-in default: `*.chatgpt.com`. `--group <name>` remains an explicit legacy route and accepts `--force` with the same exclude-current semantics; it cannot be combined with a domain positional. `--all` and `--no-auto` remain legacy group-mode options, not aliases for domain targets. The new scheduler invokes `fix --scheduled --quiet`; `--scheduled` is an internal explicit domain-mode marker. Help, README, examples, and diagnostics must explain the new default and the legacy modes.
+
+Domain entries live in a new `domains` section of `afc.config.yaml`, separate from legacy `targets`. An entry holds `pattern` and optional probe overrides (`probe`, `extraProbes`, `geoProbe`, country policy) using the existing validated probe shape. `domains: []` means no scheduled domain targets; absence means the built-in ChatGPT range. On the first `schedule add`, materialize that default in the new file before adding the requested range; otherwise the addition would unexpectedly drop ChatGPT. The old `targets` field is not silently converted or deleted. `schedule add`, `list`, and `remove` manage `domains`, preserving comments and other configuration; writes are atomic and validated. `schedule install` still creates or updates exactly one system task, pointing at a stable config path. If an installed task points at another config file, commands warn that reinstalling is required. Schedule status/list makes the active targets and config path visible.
+
+## Routing resolution
+
+Use the current controller rather than a stale subscription file as authority for live `/rules`, `/proxies`, and `/configs` data. Rules are ordered and disabled rules ignored. The first release can prove intersections and precedence for `DOMAIN`, `DOMAIN-SUFFIX`, and `MATCH`. More rule types may be supported only with equivalent precedence tests. For a wildcard, compute concrete witness hosts for each provable distinct route, including an apex witness and a witness for a possible `MATCH` remainder; a mere textual intersection is not enough if an earlier rule always shadows it. A confirmed binding records the witness, matched rule index/type/payload, and selected policy group. Exact-host routing uses the same ordered evaluation. When a preceding predicate cannot be evaluated (`RULE-SET`, `GEOSITE`, process/network/IP predicates, complex logic, etc.), the affected route is unresolved rather than guessed. Live `/connections` observations may corroborate an exact-host route when safely available, but absence of a connection cannot prove a wildcard route. No user traffic is closed or redirected for routing discovery.
+
+Follow policy-group delegation via `/proxies` with cycle detection. A `Selector` that currently selects another group is followed to the effective child; select the deepest mutable Selector whose real-node candidates can affect the requested route. Never pin an automatic group (`URLTest`, `Fallback`, `LoadBalance`, etc.) or overwrite `DIRECT`/`REJECT`. Report those paths as skipped, not repaired. Deduplicate the final Selector by group identity, retaining every domain witness that led to it. `MATCH` has no special exemption: if a witness provably reaches it, its group is eligible. If global/direct mode or an unsupported routing form prevents reliable identification, report incomplete rather than choosing an arbitrary group.
+
+The guarantee is to repair all **confirmed routing groups**, not to test infinitely many subdomains or guarantee every application function on every host. Output must make that distinction explicit.
+
+## Probe and repair decisions
+
+Retain the temporary mihomo probe instance so candidate testing never cycles the user's active Selector. For known high-confidence service patterns, use the existing service-specific probe (for ChatGPT, the dedicated endpoint and country policy). Do not use an unrelated service's successful extra probe as proof that a requested domain works. For other hosts, use `GET https://<concrete-host>/` and accept only a 200–399 response as generic HTTPS reachability; allow an explicit URL/status override for login-protected or region-specific services. Label generic results “reachable”, not “function verified”. If a group is reached by multiple requested witnesses, its replacement must satisfy every distinct applicable probe policy before switching. A failure to test one required policy is not success.
+
+Ordinary repair probes the current node first and keeps it when all applicable policies pass. Otherwise it searches other real nodes and switches only to a verified candidate. `--force` always excludes the current node from candidates, regardless of its health, and switches only to a different verified node. If none exists, preserve the original selection and report no alternative. The flag applies to the manual invocation only; scheduled runs are sticky. Both paths re-read the group before the final `PUT` to avoid blindly overwriting a selection changed during a long probe, and never claim a dry-run applied a switch. A Selector with no loadable real-node definitions is reported as an environment limitation rather than repaired.
+
+## CLI results and failure handling
+
+For each target, show the pattern, confirmed route evidence, group, current node, decision, and probe confidence. List skipped paths and unresolved rule classes separately. `--dry-run` resolves and probes identically but performs no `PUT`. `--quiet` emits bounded, timestamped summaries suitable for scheduler logs. Preserve existing exit-code meanings: `0` only when all requested work was resolved and no required repair failed; `2` when a resolved target needs a replacement but no usable alternative exists; `3` for incomplete routing or environment failures; `64` for invalid syntax/configuration. When multiple outcomes occur, an incomplete/error result takes precedence over no-alternative, which takes precedence over success. A successful switch in one group must never hide unresolved work in another.
+
+## Verification and migration
+
+Test domain normalization and apex-inclusive wildcard matching; rule order, shadowing, disabled rules, `MATCH`, and opaque-rule ambiguity; delegated/cyclic group chains; group deduplication and multi-policy candidate acceptance; sticky and forced decisions; no-alternative and concurrent selection changes; config editing, default/empty domains, old `targets` compatibility; all scheduler backends' generated CLI arguments; and output/exit-code aggregation. Keep current group-oriented tests passing for explicit legacy commands. Update the sample config and README to explain that upgrading changes the default scheduled scope from group auto-discovery to persisted domain targets and that `schedule install` must be rerun to replace old `fix --all --quiet` task definitions. No automatic modification of existing system tasks occurs just by upgrading the package.
