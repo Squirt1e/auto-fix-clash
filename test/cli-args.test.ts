@@ -164,4 +164,6 @@ test('fix 帮助说明通配符包含裸域、通用可达性和 force', async (
   assert.match(out, /包含裸域/);
   assert.match(out, /--force/);
   assert.match(out, /只能证明 HTTPS 可达/);
+  assert.match(out, /--all\s+旧版按组模式/);
+  assert.doesNotMatch(out, /--all[^\n]*默认行为/);
 });

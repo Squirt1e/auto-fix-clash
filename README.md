@@ -10,13 +10,15 @@
 - 叫「香港 20」的节点，实测出口在日本
 - 昨天挑好的节点今天又挂了
 
-afc 帮你自动挑节点：**直接请求目标站点、看它的真实响应**，能用的才用，坏了自己换。
+afc 帮你自动挑节点：你给它一个稳定的域名范围，它按 mihomo 当前规则找出实际承载流量的代理组，
+再**直接请求目标站点、看它的真实响应**；订阅更新后即使组名变了，也会在下一次运行时重新定位。
 
 ## 快速开始
 
 ```bash
 npm i -g auto-fix-clash   # 要求 Node.js ≥ 20（macOS / Linux / Windows）
-afc schedule install      # 装完就不用管：每 5 分钟自动检查，节点坏了自己换
+afc fix '*.chatgpt.com'   # 立即修复；引号避免 shell 展开 *
+afc schedule install      # 每 5 分钟按已登记域名重新解析路由并修复
 ```
 
 看看它在不在跑：
@@ -36,11 +38,13 @@ afc schedule uninstall    # 不会改动你的任何 Clash 配置
 
 ## 它会做什么
 
-- 每 5 分钟检查一次该组**当前节点**：能用就什么都不做；不能用了才扫描候选、换成实测可用的那个
+- 默认处理 `*.chatgpt.com`；这里的 `*.` **同时包含裸域** `chatgpt.com` 和任意层级子域名
+- 每次从当前 `/rules`、`/proxies`、`/configs` 解析域名实际经过的所有可确认代理组；落到 `MATCH` 的路径也会修复
+- 检查每个确认组的**当前节点**：能用就不动；不能用了才扫描候选、换成满足该域名全部判据的节点
 - **只通过控制端点改变组的选中节点，不写任何 Clash 配置**
-- 默认照顾**你在 Clash 里手动钉了某个节点的组**（这类组坏了内核不会替你换，比如你手动钉了 GPT 组）
-- 不会碰指向 `DIRECT`/`REJECT` 的组（如 `Bilibili`、`去广告`），也不会碰委托给"自动选择"的组
-- 想让更多组也被照顾：`afc add <组名>`
+- 不会碰 `DIRECT`/`REJECT` 等内建策略，也不会强行钉住 URLTest、Fallback、LoadBalance 等自动组
+- 遇到 `RULE-SET`、`GEOSITE`、进程/IP 条件等无法可靠证明的规则时，已确认的组仍会修复，但结果标为“不完整”并返回退出码 3
+- ChatGPT 使用服务专用判据；其它域名默认的 HTTPS 200–399 只证明“可达”，不代表登录或全部业务功能可用
 
 定时任务由系统自带的调度器承担，后端按平台自动选择，一般不用管：
 
@@ -68,13 +72,15 @@ afc schedule install --dry-run      # 先看将要写入的任务定义
 | 命令 | 作用 |
 |---|---|
 | `afc schedule install` | 装定时自动修复（最常用） |
+| `afc schedule add '*.example.com'` | 登记定时修复域名范围 |
+| `afc schedule list` | 查看定时修复域名 |
+| `afc schedule remove '*.example.com'` | 移除定时修复域名 |
 | `afc schedule status` | 看它是否在跑、最近做了什么 |
 | `afc schedule uninstall` | 卸载 |
 | `afc groups` | 当前订阅有哪些组、哪些会被照顾 |
 | `afc doctor` | 体检并打印判定表 |
-| `afc fix` | 立刻检查并修复 |
-| `afc add <组名>` | 把某个组加入照顾范围 |
-| `afc remove <组名>` | 从照顾范围移除 |
+| `afc fix '*.chatgpt.com'` | 解析该域名范围并立刻修复所有确认组 |
+| `afc fix '*.chatgpt.com' --force` | 即使当前节点可用，也换到另一个实测可用节点 |
 
 任何命令加 `--help` 看详细用法，例如 `afc add --help`。
 
@@ -101,23 +107,46 @@ GPT　当前：[Normal x0.5] 日本 03　候选 38 个
 当前节点坏掉时自动换：
 
 ```bash
-$ afc fix
-GPT：已切换 [Normal x0.5] 日本 02 → [Normal x0.5] 日本 03
+$ afc fix '*.chatgpt.com'
+*.chatgpt.com → GPT（DOMAIN-SUFFIX chatgpt.com）：已切换 日本 02 → 日本 03
 ```
 
 当前节点还好时什么都不做，只探测这一个节点（约 2 秒）：
 
 ```bash
-$ afc fix
-GPT：保持 [Normal x0.5] 日本 03（可用）
+$ afc fix '*.chatgpt.com'
+*.chatgpt.com → GPT：保持 日本 03（服务功能已验证）
 ```
 
-## 手动控制
+需要主动轮换时，`--force` 会排除当前节点，只切换到另一个同时通过全部判据的节点；没有替代节点时原选择保持不变：
+
+```bash
+afc fix '*.chatgpt.com' --force
+```
+
+## 定时域名管理
+
+```bash
+afc schedule add '*.chatgpt.com'
+afc schedule list
+afc schedule remove '*.chatgpt.com'
+afc schedule install
+```
+
+首次 `schedule add` 会把内置 `*.chatgpt.com` 默认值一并写入配置。`domains: []` 表示明确禁用全部定时域名；
+未写 `domains` 才会使用内置默认值。自定义站点若不能用通用 HTTPS 状态码判断，可给 `schedule add` 同时传
+`--url` 与 `--expect`，详见 `afc schedule --help`。
+
+## 旧版按组控制（显式模式）
+
+域名模式是默认行为；需要固定处理某个组时，旧命令仍然保留：
 
 ```bash
 afc groups                # 列出代理组（第一列是编号）
-afc add 3                 # 用编号把第 3 个组交给 afc 管理（组名带 emoji 时省事）
+afc add 3                 # 把第 3 个组写入 legacy targets 配置
 afc fix --group GPT       # 只处理指定组（也可写编号，如 --group 3）
+afc fix --group GPT --force
+afc fix --all             # 旧版按组自动发现模式
 afc fix --dry-run         # 只看会怎么切，不做改动
 afc fix --no-auto         # 只处理配置里声明过的组
 afc doctor --json         # 机器可读，可直接喂给 jq
@@ -173,8 +202,12 @@ controller:
 ## 常见问题
 
 **Clash 里的 GPT 分组老是断开，能不能自动换节点？**
-这正是 afc 做的事：每 5 分钟验证一次当前节点，连不上才去扫候选、换成实测能用的那个（能连就绝不动你的选择）。
-只在你手动钉了节点的组、或配置里声明过的组上生效，`DIRECT`/`REJECT` 与委托给「自动选择」的组一律不碰。
+可以。登记 `*.chatgpt.com` 后，afc 每次都按当前规则重新找它实际经过的组；连不上才扫描候选，
+能连就保持你的选择。`DIRECT`/`REJECT`、自动组会跳过，无法展开的不透明规则会明确报告为不完整。
+
+**从 1.2.x 升级后为什么要重跑 `afc schedule install`？**
+1.3.0 把计划任务从旧的 `fix --all --quiet` 改为域名驱动的 `fix --scheduled --quiet`。
+仅升级 npm 包不会自动改系统任务；先用 `afc schedule list` 核对域名，再重跑一次 `afc schedule install` 覆盖旧定义。
 
 **系统提示「App 后台活动」显示为 Node.js Foundation？（仅 macOS）**
 正常，那就是本项目的定时任务（它执行的是 `node`，macOS 按代码签名主体归类）。

@@ -1,5 +1,5 @@
 # auto-fix-clash / afc 配置
-# 说明：省略本文件时程序会使用内置的 GPT/Codex 预设（与下面 targets 的内容一致）。
+# 说明：省略 domains 时程序会使用内置的 *.chatgpt.com 域名目标。
 # 查找顺序：--config <path> → ./afc.config.yaml → ~/.config/afc/config.yaml
 
 probe:
@@ -37,6 +37,26 @@ schedule:
   # 计划任务的运行间隔（秒）。越小恢复越快，但探测流量与触发机场风控的概率越高。
   intervalSeconds: 300
 
+# 定时任务与不带位置参数的 `afc fix` 使用这里的域名范围。
+# `*.` 同时包含裸域与任意层级子域；每次运行都会按当前 mihomo 规则重新寻找代理组。
+domains:
+  - pattern: "*.chatgpt.com"
+    probe:
+      url: https://chatgpt.com/backend-api/codex/responses
+      expectedStatus: [405]
+      method: GET
+    extraProbes:
+      - url: https://api.openai.com/v1/models
+        expectedStatus: [401]
+        method: GET
+    geoProbe:
+      url: https://chatgpt.com/cdn-cgi/trace
+      format: cloudflare-trace
+    countryDeny: [HK, CN, MO, RU, IR, KP, CU, SY, AF, BY, VE, MM]
+    countryAllow: []
+
+# 旧版显式按组配置：仅 `afc fix --group/--all/--no-auto` 等 legacy 模式使用。
+# 新的定时域名模式不会依赖这些可能随订阅变化的组名。
 targets:
   - name: GPT
     # 备用组名（可选）。不同订阅常给同一个用途的组起不同名字，别名能让一套配置通用。
