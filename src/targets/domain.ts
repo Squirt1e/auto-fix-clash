@@ -15,6 +15,13 @@ export interface DomainTargetConfig {
   geoProbe?: GeoProbe;
   countryAllow: string[];
   countryDeny: string[];
+  /** 配置文件里显式出现过的可选字段；用于区分“省略”与“显式空数组”。 */
+  overrides?: {
+    extraProbes?: true;
+    geoProbe?: true;
+    countryAllow?: true;
+    countryDeny?: true;
+  };
 }
 
 const CHATGPT_COUNTRY_DENY = ['HK', 'CN', 'MO', 'RU', 'IR', 'KP', 'CU', 'SY', 'AF', 'BY', 'VE', 'MM'];
@@ -41,7 +48,7 @@ export function parseDomainPattern(input: string): DomainPattern {
   const wildcard = value.startsWith('*.');
   const rawHost = wildcard ? value.slice(2) : value;
 
-  if (value.includes('://') || /[/?#]/.test(rawHost) || rawHost.includes('*')) {
+  if (value.includes('://') || /[\\/?#]/.test(rawHost) || rawHost.includes('*')) {
     throw new UsageError(`无效域名范围：${input}`);
   }
 

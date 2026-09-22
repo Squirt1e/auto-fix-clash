@@ -347,10 +347,12 @@ export class ProbeEngine {
       }));
       const usable = screenedBatch.filter((result) => result.verdict === 'ok');
       if (usable.length === 0) continue;
-      const best = usable.sort((a, b) => (a.ttfbMs ?? Infinity) - (b.ttfbMs ?? Infinity))[0]!;
-      const confirmed = await this.probePolicies(best.node, policies, 0);
-      if (confirmed.verdict === 'ok') return { result: confirmed, screened };
-      lastScreened = confirmed;
+      const ranked = usable.sort((a, b) => (a.ttfbMs ?? Infinity) - (b.ttfbMs ?? Infinity));
+      for (const candidate of ranked) {
+        const confirmed = await this.probePolicies(candidate.node, policies, 0);
+        if (confirmed.verdict === 'ok') return { result: confirmed, screened };
+        lastScreened = confirmed;
+      }
     }
 
     return { screened, ...(lastScreened ? { lastScreened } : {}) };

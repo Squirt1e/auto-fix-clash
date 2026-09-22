@@ -34,6 +34,46 @@ test('通配范围按规则顺序确认精确、后缀和 MATCH 的所有不同�
   assert.ok(result.bindings.every((binding) => binding.evidence.length >= 1));
 });
 
+test('接受 mihomo API 的 DomainSuffix 规则名', () => {
+  const result = resolveDomainRoutes(
+    [parseDomainPattern('*.example.com')],
+    [rule(0, 'DomainSuffix', 'example.com', 'MEDIA')],
+    proxies(),
+    'rule',
+  );
+  assert.deepEqual(result.bindings.map((binding) => binding.group), ['MEDIA']);
+  assert.equal(result.issues.length, 0);
+});
+
+test('精确规则遮住后缀裸域时仍会为后缀子域和 MATCH 分区建见证', () => {
+  const result = resolveDomainRoutes(
+    [parseDomainPattern('*.example.com')],
+    [
+      rule(0, 'DOMAIN', 'media.example.com', 'API'),
+      rule(1, 'DOMAIN-SUFFIX', 'media.example.com', 'MEDIA'),
+      rule(2, 'MATCH', '', 'DEFAULT'),
+    ],
+    proxies(),
+    'rule',
+  );
+  assert.deepEqual(result.bindings.map((binding) => binding.group).sort(), ['API', 'DEFAULT', 'MEDIA']);
+  assert.equal(result.issues.length, 0);
+});
+
+test('MATCH 见证不会落入更窄的后缀分区', () => {
+  const result = resolveDomainRoutes(
+    [parseDomainPattern('*.example.com')],
+    [
+      rule(0, 'DOMAIN', 'example.com', 'API'),
+      rule(1, 'DOMAIN-SUFFIX', 'afc-route-probe.example.com', 'MEDIA'),
+      rule(2, 'MATCH', '', 'DEFAULT'),
+    ],
+    proxies(),
+    'rule',
+  );
+  assert.deepEqual(result.bindings.map((binding) => binding.group).sort(), ['API', 'DEFAULT', 'MEDIA']);
+});
+
 test('禁用规则不参与路由，较早的精确规则不受较晚不透明规则影响', () => {
   const result = resolveDomainRoutes(
     [parseDomainPattern('api.example.com')],

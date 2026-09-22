@@ -6,7 +6,7 @@ import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK } from '../src/exit-code
 import type { GroupRepairOptions, RepairOutcome } from '../src/heal/repair.ts';
 import { policyForDomain, repairDomains } from '../src/heal/domain-repair.ts';
 import { formatRouteBinding } from '../src/cli/commands/fix.ts';
-import type { DomainTargetConfig } from '../src/targets/domain.ts';
+import { DEFAULT_DOMAIN_TARGETS, type DomainTargetConfig } from '../src/targets/domain.ts';
 
 const rule = (index: number, type: string, payload: string, proxy: string): MihomoRule => ({
   index, type, payload, proxy, size: -1,
@@ -52,7 +52,7 @@ test('每个确认组只修复一次，同组的多个域名判据会合并', as
     repairer: async (options) => { calls.push(options); return kept(options.groupName); },
   });
   assert.deepEqual(calls.map((call) => call.groupName).sort(), ['DEFAULT', 'GPT']);
-  assert.equal(calls.find((call) => call.groupName === 'GPT')?.policies.length, 2);
+  assert.equal(calls.find((call) => call.groupName === 'GPT')?.policies.length, 3);
   assert.equal(report.exitCode, EXIT_OK);
 });
 
@@ -102,6 +102,46 @@ test('探测策略优先使用显式覆盖，其次 ChatGPT 服务判据，最�
   assert.equal(generic.confidence, 'reachability');
 });
 
+test('域名模式要求主判据通过，并把附加端点拆成独立必需判据', async () => {
+  const target = DEFAULT_DOMAIN_TARGETS[0]!;
+  const calls: GroupRepairOptions[] = [];
+  await repairDomains({
+    config: loadConfig(), targets: [target],
+    client: fakeClient([rule(0, 'MATCH', '', 'GPT')]),
+    repairer: async (options) => { calls.push(options); return kept(options.groupName); },
+  });
+  const policies = calls[0]!.policies;
+  assert.equal(policies.length, 2);
+  assert.equal(policies[0]!.target.probe.url, 'https://chatgpt.com/backend-api/codex/responses');
+  assert.deepEqual(policies[0]!.target.extraProbes, []);
+  assert.equal(policies[1]!.target.probe.url, 'https://api.openai.com/v1/models');
+});
+
+test('通用通配符只探测用户给出的裸域，不探测合成路由见证', async () => {
+  const calls: GroupRepairOptions[] = [];
+  await repairDomains({
+    config: loadConfig(), targets: [domain('*.example.com')],
+    client: fakeClient([rule(0, 'MATCH', '', 'DEFAULT')]),
+    repairer: async (options) => { calls.push(options); return kept(options.groupName); },
+  });
+  assert.deepEqual(
+    [...new Set(calls.flatMap((call) => call.policies.map((policy) => policy.target.probe.url)))],
+    ['https://example.com/'],
+  );
+});
+
+test('无主判据的显式出口覆盖会合并到服务预设', () => {
+  const policy = policyForDomain({
+    ...domain('*.chatgpt.com'),
+    geoProbe: { url: 'https://geo.example/trace', format: 'cloudflare-trace' },
+    countryAllow: ['US'],
+    countryDeny: ['CN'],
+  }, 'chatgpt.com');
+  assert.equal(policy.target.geoProbe?.url, 'https://geo.example/trace');
+  assert.deepEqual(policy.target.countryAllow, ['US']);
+  assert.deepEqual(policy.target.countryDeny, ['CN']);
+});
+
 test('协调器只读取一次实时配置、规则和代理表，并透传 force', async () => {
   const counts = { configs: 0, rules: 0, proxies: 0 };
   let seenForce = false;
@@ -117,6 +157,18 @@ test('协调器只读取一次实时配置、规则和代理表，并透传 forc
   });
   assert.deepEqual(counts, { configs: 1, rules: 1, proxies: 1 });
   assert.equal(seenForce, true);
+});
+
+test('选择竞争导致 stale 时聚合为不完整退出码 3', async () => {
+  const report = await repairDomains({
+    config: loadConfig(), targets: [domain('example.com')],
+    client: fakeClient([rule(0, 'MATCH', '', 'DEFAULT')]),
+    repairer: async (options) => ({
+      ...kept(options.groupName),
+      plan: { action: 'stale', from: 'A', to: 'USER', reason: 'changed' },
+    }),
+  });
+  assert.equal(report.exitCode, EXIT_ENVIRONMENT);
 });
 
 test('路由输出包含域名、规则依据、代理组和判据可信度', async () => {

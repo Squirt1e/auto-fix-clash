@@ -20,7 +20,7 @@ test('精确域名只匹配自身', () => {
 
 test('IDN 会转成 ASCII，URL、路径和任意通配符会被拒绝', () => {
   assert.equal(parseDomainPattern('例子.测试').apex, 'xn--fsqu00a.xn--0zwm56d');
-  for (const bad of ['https://chatgpt.com', 'chatgpt.com/path', '*gpt.com', '', '.example.com', 'bad-.com']) {
+  for (const bad of ['https://chatgpt.com', 'chatgpt.com/path', 'chatgpt.com\\path', '*gpt.com', '', '.example.com', 'bad-.com']) {
     assert.throws(() => parseDomainPattern(bad), UsageError, bad);
   }
 });

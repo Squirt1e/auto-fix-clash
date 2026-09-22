@@ -1,11 +1,11 @@
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig } from '../../config.ts';
+import { DEFAULT_SCHEDULE, loadConfig } from '../../config.ts';
 import { addDomainToConfigText, removeDomainFromConfigText, writeConfigText } from '../../config-edit.ts';
 import { UsageError } from '../../errors.ts';
 import { EXIT_OK, EXIT_USAGE } from '../../exit-codes.ts';
-import { currentPlatform } from '../../platform.ts';
+import { afcStateDir, currentPlatform, joinFor, type PlatformContext } from '../../platform.ts';
 import { DEFAULT_DOMAIN_TARGETS, parseDomainPattern, type DomainTargetConfig } from '../../targets/domain.ts';
 import {
   BACKEND_CHOICES,
@@ -21,6 +21,46 @@ import { optBoolean, optNumber, optString, type CommandContext } from '../contex
 import { parseExpectedStatus, resolveWritePath } from './add.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+
+export interface ScheduleMetadata { configPath: string }
+
+function scheduleMetadataPath(ctx: PlatformContext): string {
+  return joinFor(ctx)(afcStateDir(ctx), 'schedule.json');
+}
+
+export function writeScheduleMetadata(ctx: PlatformContext, configPath: string): void {
+  const path = scheduleMetadataPath(ctx);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify({ configPath }, null, 2)}\n`, 'utf8');
+}
+
+export function readScheduleMetadata(ctx: PlatformContext): ScheduleMetadata | undefined {
+  try {
+    const raw = JSON.parse(readFileSync(scheduleMetadataPath(ctx), 'utf8')) as { configPath?: unknown };
+    return typeof raw.configPath === 'string' && raw.configPath !== '' ? { configPath: raw.configPath } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function configPathMismatchWarning(installedPath: string, requestedPath: string): string | undefined {
+  return installedPath === requestedPath
+    ? undefined
+    : `注意：已安装的计划任务仍使用 ${installedPath}；当前操作的是 ${requestedPath}。请重跑 afc schedule install --config ${requestedPath}`;
+}
+
+export function resolveScheduleConfigArgument(
+  explicit: string | undefined,
+  ctx: PlatformContext = currentPlatform(),
+): string | undefined {
+  return explicit ?? readScheduleMetadata(ctx)?.configPath;
+}
+
+function emitInstalledConfigWarning(ctx: PlatformContext, requestedPath: string): void {
+  const installed = readScheduleMetadata(ctx)?.configPath;
+  const warning = installed ? configPathMismatchWarning(installed, requestedPath) : undefined;
+  if (warning) process.stderr.write(`${warning}\n`);
+}
 
 /**
  * 计划任务要执行的 CLI 入口。
@@ -78,23 +118,32 @@ export async function run(context: CommandContext): Promise<number> {
 
   switch (action) {
     case 'install': {
-      const config = loadConfig(optString(context.values, 'config'));
+      const explicitConfig = resolveScheduleConfigArgument(optString(context.values, 'config'), ctx);
+      const configPath = resolveWritePath(explicitConfig);
+      const dryRun = optBoolean(context.values, 'dry-run');
+      if (!existsSync(configPath) && !dryRun) {
+        writeConfigText(configPath, addDomainToConfigText('', DEFAULT_DOMAIN_TARGETS[0]!, false));
+      }
+      const config = existsSync(configPath)
+        ? loadConfig(configPath)
+        : { schedule: DEFAULT_SCHEDULE, domains: DEFAULT_DOMAIN_TARGETS };
       const interval = optNumber(context.values, 'interval') ?? config.schedule.intervalSeconds;
       const options: ScheduleOptions = {
         nodePath: process.execPath,
         cliPath: resolveCliEntry(),
         intervalSeconds: interval,
         workingDirectory: process.cwd(),
-        ...(config.sourcePath ? { configPath: config.sourcePath } : {}),
+        configPath,
         logDir: scheduleLogDir(ctx),
       };
 
-      if (optBoolean(context.values, 'dry-run')) {
+      if (dryRun) {
         process.stdout.write(`将要写入（后端：${backend.name}）：\n\n${backend.preview(options)}\n`);
         return EXIT_OK;
       }
 
       const result = await backend.install(options);
+      writeScheduleMetadata(ctx, configPath);
       process.stdout.write(
         `已安装周期性修复任务（后端：${result.backend}）：每 ${interval} 秒运行一次` +
         `${result.replaced ? '，已覆盖同名旧任务' : ''}\n` +
@@ -138,8 +187,22 @@ export async function run(context: CommandContext): Promise<number> {
         `${status.intervalSeconds === undefined ? '' : `，每 ${status.intervalSeconds} 秒`}\n` +
         (status.lastLogLine ? `  最近一次：${status.lastLogLine}\n` : '  还没有运行记录。\n'),
       );
-      const config = loadConfig(optString(context.values, 'config'));
-      process.stdout.write(`  域名范围：${config.domains.map((target) => target.pattern).join('、') || '（无）'}\n`);
+      const metadata = readScheduleMetadata(ctx);
+      const explicitConfig = optString(context.values, 'config');
+      const requestedPath = explicitConfig ? resolveWritePath(explicitConfig) : undefined;
+      if (metadata?.configPath && requestedPath) {
+        const warning = configPathMismatchWarning(metadata.configPath, requestedPath);
+        if (warning) process.stderr.write(`${warning}\n`);
+      }
+      if (metadata?.configPath && existsSync(metadata.configPath)) {
+        const config = loadConfig(metadata.configPath);
+        process.stdout.write(
+          `  配置：${metadata.configPath}\n` +
+          `  域名范围：${config.domains.map((target) => target.pattern).join('、') || '（无）'}\n`,
+        );
+      } else {
+        process.stdout.write('  无法确认已安装任务的配置路径，请重跑 afc schedule install。\n');
+      }
       if (!status.loaded) {
         process.stdout.write('  请重新执行 afc schedule install 以载入任务。\n');
       }
@@ -184,7 +247,7 @@ function handleDomainAction(
   action: 'add' | 'remove' | 'list',
   context: CommandContext,
 ): number {
-  const explicit = optString(context.values, 'config');
+  const explicit = resolveScheduleConfigArgument(optString(context.values, 'config'));
   if (action === 'list') {
     const config = loadConfig(explicit);
     process.stdout.write(`定时修复域名（${config.sourcePath ?? '内置默认'}）：\n`);
@@ -193,6 +256,7 @@ function handleDomainAction(
       const source = target.probe ? '显式/服务判据' : '通用 HTTPS 可达性';
       process.stdout.write(`  - ${target.pattern}（${source}）\n`);
     }
+    if (config.sourcePath) emitInstalledConfigWarning(currentPlatform(), config.sourcePath);
     return EXIT_OK;
   }
 
@@ -211,6 +275,7 @@ function handleDomainAction(
     }
     const materializeDefaults = !/^domains:/m.test(text);
     writeConfigText(path, addDomainToConfigText(text, target, materializeDefaults));
+    emitInstalledConfigWarning(currentPlatform(), path);
     process.stdout.write(
       `已登记定时修复域名：${target.pattern}\n  配置：${path}\n` +
       '如果系统任务已经安装，请重跑 afc schedule install 以确认它指向这份配置。\n',
@@ -224,6 +289,7 @@ function handleDomainAction(
   const next = removeDomainFromConfigText(text, rawPattern);
   if (next === undefined) throw new UsageError(`配置中没有登记 “${parseDomainPattern(rawPattern).input}”。`);
   writeConfigText(config.sourcePath, next);
+  emitInstalledConfigWarning(currentPlatform(), config.sourcePath);
   process.stdout.write(`已移除定时修复域名：${parseDomainPattern(rawPattern).input}\n  配置：${config.sourcePath}\n`);
   return EXIT_OK;
 }

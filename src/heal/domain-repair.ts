@@ -44,12 +44,6 @@ export interface RepairDomainsOptions {
   repairer?: (options: GroupRepairOptions) => Promise<RepairOutcome>;
 }
 
-function patternsIntersect(a: DomainPattern, b: DomainPattern): boolean {
-  if (a.apex === b.apex) return true;
-  if (a.wildcard && b.apex.endsWith(`.${a.apex}`)) return true;
-  return b.wildcard && a.apex.endsWith(`.${b.apex}`);
-}
-
 function asTarget(
   name: string,
   source: Pick<DomainTargetConfig, 'probe' | 'extraProbes' | 'geoProbe' | 'countryAllow' | 'countryDeny'>,
@@ -67,37 +61,71 @@ function asTarget(
 }
 
 export function policyForDomain(target: DomainTargetConfig, witness: string): ProbePolicy {
-  if (target.probe) {
-    return {
-      label: `${target.pattern} 功能判据`,
-      target: asTarget(target.pattern, target),
-      confidence: 'service',
-    };
-  }
-
   const requested = parseDomainPattern(target.pattern);
   const chatgptPattern = parseDomainPattern(DEFAULT_DOMAIN_TARGETS[0]!.pattern);
-  if (patternsIntersect(requested, chatgptPattern)) {
-    const preset = DEFAULT_DOMAIN_TARGETS[0]!;
+  const preset = requested.apex === chatgptPattern.apex || requested.apex.endsWith(`.${chatgptPattern.apex}`)
+    ? DEFAULT_DOMAIN_TARGETS[0]
+    : undefined;
+  const source = target.probe ? target : preset;
+  const geoProbe = target.overrides?.geoProbe || target.geoProbe ? target.geoProbe : source?.geoProbe;
+  const countryAllow = target.overrides?.countryAllow || target.countryAllow.length > 0
+    ? target.countryAllow
+    : (source?.countryAllow ?? []);
+  const countryDeny = target.overrides?.countryDeny || target.countryDeny.length > 0
+    ? target.countryDeny
+    : (source?.countryDeny ?? []);
+
+  if (source?.probe) {
     return {
-      label: `${target.pattern} ChatGPT 服务判据`,
-      target: asTarget(target.pattern, preset),
+      label: `${target.pattern} 功能判据`,
+      target: asTarget(target.pattern, {
+        probe: source.probe,
+        extraProbes: [],
+        ...(geoProbe ? { geoProbe } : {}),
+        countryAllow,
+        countryDeny,
+      }),
       confidence: 'service',
     };
   }
 
   return {
-    label: `${witness} HTTPS 可达性`,
+    label: `${requested.apex} HTTPS 可达性`,
     target: {
       name: target.pattern,
       aliases: [],
-      probe: { url: `https://${witness}/`, expectedStatus: [200, 399], method: 'GET' },
+      probe: { url: `https://${requested.apex}/`, expectedStatus: [200, 399], method: 'GET' },
+      extraProbes: [],
+      ...(geoProbe ? { geoProbe } : {}),
+      countryAllow,
+      countryDeny,
+    },
+    confidence: 'reachability',
+  };
+}
+
+function policiesForDomain(target: DomainTargetConfig, witness: string): ProbePolicy[] {
+  const primary = policyForDomain(target, witness);
+  const requested = parseDomainPattern(target.pattern);
+  const chatgpt = parseDomainPattern(DEFAULT_DOMAIN_TARGETS[0]!.pattern);
+  const preset = requested.apex === chatgpt.apex || requested.apex.endsWith(`.${chatgpt.apex}`)
+    ? DEFAULT_DOMAIN_TARGETS[0]
+    : undefined;
+  const extras = target.overrides?.extraProbes || target.extraProbes.length > 0
+    ? target.extraProbes
+    : (preset?.extraProbes ?? []);
+  return [primary, ...extras.map((probe, index) => ({
+    label: `${target.pattern} 附加判据 ${index + 1}`,
+    target: {
+      name: target.pattern,
+      aliases: [],
+      probe,
       extraProbes: [],
       countryAllow: [],
       countryDeny: [],
     },
-    confidence: 'reachability',
-  };
+    confidence: primary.confidence,
+  } satisfies ProbePolicy))];
 }
 
 export async function repairDomains(options: RepairDomainsOptions): Promise<DomainRepairReport> {
@@ -122,11 +150,22 @@ export async function repairDomains(options: RepairDomainsOptions): Promise<Doma
   const issues: DomainRepairIssue[] = resolution.issues.map((issue: RouteIssue) => ({ ...issue }));
 
   for (const binding of resolution.bindings) {
-    const policies = binding.evidence.map((evidence) => {
+    const policiesByKey = new Map<string, ProbePolicy>();
+    for (const evidence of binding.evidence) {
       const target = targetsByPattern.get(evidence.pattern);
       if (!target) throw new Error(`内部错误：找不到域名目标 ${evidence.pattern}`);
-      return policyForDomain(target, evidence.witness);
-    });
+      for (const policy of policiesForDomain(target, evidence.witness)) {
+        const key = JSON.stringify({
+          probe: policy.target.probe,
+          extraProbes: policy.target.extraProbes,
+          geoProbe: policy.target.geoProbe,
+          countryAllow: policy.target.countryAllow,
+          countryDeny: policy.target.countryDeny,
+        });
+        if (!policiesByKey.has(key)) policiesByKey.set(key, policy);
+      }
+    }
+    const policies = [...policiesByKey.values()];
     try {
       outcomes.push(await repairer({
         config: options.config,
@@ -150,7 +189,7 @@ export async function repairDomains(options: RepairDomainsOptions): Promise<Doma
     }
   }
 
-  const exitCode = issues.length > 0
+  const exitCode = issues.length > 0 || outcomes.some((outcome) => outcome.plan.action === 'stale')
     ? EXIT_ENVIRONMENT
     : outcomes.some((outcome) => outcome.plan.action === 'no-candidate')
       ? EXIT_NO_USABLE_NODE

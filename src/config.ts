@@ -407,6 +407,12 @@ function normalizeDomainTarget(raw: unknown, index: number, problems: string[]):
     ...(geoProbe ? { geoProbe } : {}),
     countryAllow: normalizeStringList(raw['countryAllow'], `${where}.countryAllow`, problems),
     countryDeny: normalizeStringList(raw['countryDeny'], `${where}.countryDeny`, problems),
+    overrides: {
+      ...(rawExtras !== undefined ? { extraProbes: true as const } : {}),
+      ...(rawGeo !== undefined ? { geoProbe: true as const } : {}),
+      ...(raw['countryAllow'] !== undefined ? { countryAllow: true as const } : {}),
+      ...(raw['countryDeny'] !== undefined ? { countryDeny: true as const } : {}),
+    },
   };
 }
 

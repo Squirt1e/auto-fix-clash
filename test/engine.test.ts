@@ -295,3 +295,27 @@ test('完全相同的探测策略只执行一次', async () => {
   assert.equal(result.verdict, 'ok');
   assert.equal(codexCalls, 1);
 });
+
+test('最快候选复核失败后继续复核同批其它可用候选', async () => {
+  const { instance, selection, ports } = fakeInstance(2);
+  const calls = new Map<string, number>();
+  const target: TargetConfig = {
+    name: 'example.com', aliases: [],
+    probe: { url: 'https://example.com/', expectedStatus: [200] },
+    extraProbes: [], countryAllow: [], countryDeny: [],
+  };
+  const policy: ProbePolicy = { label: 'example.com', target, confidence: 'reachability' };
+  const engine = await ProbeEngine.create({
+    config: configWith(2, 0), proxies: [{}], nodeNames: ['A', 'B'],
+    instanceFactory: async () => instance,
+    transport: makeTransport(ports, selection, (node) => {
+      const count = (calls.get(node) ?? 0) + 1;
+      calls.set(node, count);
+      if (node === 'A') return { status: count === 1 ? 200 : 403, ttfbMs: 5 };
+      return { status: 200, ttfbMs: 10 };
+    }),
+  });
+  const result = await engine.findFirstUsableForAll(['A', 'B'], [policy], 100);
+  await engine.close();
+  assert.equal(result.result?.node, 'B');
+});

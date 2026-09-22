@@ -204,6 +204,19 @@ test('domains 空数组可以新增，删除末项后仍是空数组', () => {
   assert.deepEqual((parseYaml(removed) as { domains: unknown[] }).domains, []);
 });
 
+test('域名编辑支持行尾注释并保留下一段的顶层注释', () => {
+  const empty = 'domains: [] # intentionally disabled\n# legacy targets below\ntargets: []\n';
+  const added = addDomainToConfigText(empty, DOMAIN, false);
+  assert.equal((parseYaml(added) as { domains: { pattern: string }[] }).domains[0]!.pattern, 'example.com');
+  assert.match(added, /# intentionally disabled/);
+
+  const commented = 'domains: # managed ranges\n  - pattern: example.com # primary\n# legacy targets below\ntargets: []\n';
+  const removed = removeDomainFromConfigText(commented, 'example.com')!;
+  assert.deepEqual((parseYaml(removed) as { domains: unknown[] }).domains, []);
+  assert.match(removed, /domains: \[\] # managed ranges/);
+  assert.match(removed, /# legacy targets below\ntargets: \[\]/);
+});
+
 test('域名探测覆盖项写入后能完整加载', () => {
   const custom: DomainTargetConfig = {
     ...DEFAULT_DOMAIN_TARGETS[0]!,

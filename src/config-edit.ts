@@ -79,12 +79,19 @@ const indent = (block: string, spaces: number): string =>
 
 /** targets 段的结束位置（下一个顶层键之前）。 */
 function findTargetsEnd(lines: string[], targetsIndex: number): number {
+  let nextKey = lines.length;
   for (let i = targetsIndex + 1; i < lines.length; i += 1) {
     const line = lines[i]!;
     if (line.trim() === '' || line.startsWith('#') || /^\s/.test(line)) continue;
-    return i;
+    nextKey = i;
+    break;
   }
-  return lines.length;
+  while (nextKey > targetsIndex + 1) {
+    const previous = lines[nextKey - 1]!;
+    if (previous.trim() === '' || previous.startsWith('#')) nextKey -= 1;
+    else break;
+  }
+  return nextKey;
 }
 
 function addBlocksToSection(text: string, section: string, blocks: string[]): string {
@@ -95,8 +102,9 @@ function addBlocksToSection(text: string, section: string, blocks: string[]): st
     const base = text.replace(/\s*$/, '');
     return `${base}${base === '' ? '' : '\n\n'}${section}:\n${rendered.join('')}`;
   }
-  if (new RegExp(`^${section}:\\s*\\[\\s*\\]\\s*$`).test(lines[sectionIndex]!)) {
-    lines[sectionIndex] = `${section}:`;
+  const emptyHeader = new RegExp(`^${section}:\\s*\\[\\s*\\](\\s*#.*)?$`).exec(lines[sectionIndex]!);
+  if (emptyHeader) {
+    lines[sectionIndex] = `${section}:${emptyHeader[1] ?? ''}`;
   }
   const end = findTargetsEnd(lines, sectionIndex);
   let insertAt = end;
@@ -130,9 +138,14 @@ export function removeDomainFromConfigText(text: string, requestedPattern: strin
   for (let i = domainsIndex + 1; i < sectionEnd; i += 1) {
     const match = /^\s{2}- pattern:\s*(.+?)\s*$/.exec(lines[i]!);
     if (!match) continue;
-    const raw = match[1]!.replace(/^["']|["']$/g, '');
+    let raw: unknown;
     try {
-      if (parseDomainPattern(raw).input === wanted) {
+      raw = (parseYaml(`value: ${match[1]!}\n`) as { value?: unknown }).value;
+    } catch {
+      continue;
+    }
+    try {
+      if (typeof raw === 'string' && parseDomainPattern(raw).input === wanted) {
         start = i;
         break;
       }
@@ -153,7 +166,10 @@ export function removeDomainFromConfigText(text: string, requestedPattern: strin
   const out = [...lines.slice(0, start), ...lines.slice(trimmedEnd)];
   const nextEnd = findTargetsEnd(out, domainsIndex);
   const hasEntry = out.slice(domainsIndex + 1, nextEnd).some((line) => /^\s{2}- pattern:/.test(line));
-  if (!hasEntry) out[domainsIndex] = 'domains: []';
+  if (!hasEntry) {
+    const comment = /(#.*)$/.exec(out[domainsIndex]!)?.[1];
+    out[domainsIndex] = `domains: []${comment ? ` ${comment}` : ''}`;
+  }
   return out.join('\n');
 }
 

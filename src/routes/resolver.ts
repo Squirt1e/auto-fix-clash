@@ -97,9 +97,11 @@ export function resolvePolicy(policy: string, proxies: Record<string, ProxyInfo>
 }
 
 function normalizedRule(rule: MihomoRule): MihomoRule {
+  const compactType = rule.type.trim().replace(/[-_]/g, '').toUpperCase();
+  const type = compactType === 'DOMAINSUFFIX' ? 'DOMAIN-SUFFIX' : compactType;
   return {
     ...rule,
-    type: rule.type.trim().toUpperCase(),
+    type,
     payload: rule.payload.trim().toLowerCase().replace(/\.$/, ''),
   };
 }
@@ -117,10 +119,18 @@ function ruleMatches(rule: MihomoRule, host: string): boolean {
 function witnessesFor(pattern: DomainPattern, rules: MihomoRule[]): string[] {
   if (!pattern.wildcard) return [pattern.apex];
   const witnesses = new Set<string>([pattern.apex]);
+  const exact = new Set<string>();
+  const suffixes: string[] = [];
   for (const rule of rules) {
     if (rule.extra?.disabled) continue;
     if (rule.type === 'DOMAIN') {
-      if (domainPatternMatches(pattern, rule.payload)) witnesses.add(parseDomainPattern(rule.payload).apex);
+      try {
+        const host = parseDomainPattern(rule.payload).apex;
+        exact.add(host);
+        if (domainPatternMatches(pattern, host)) witnesses.add(host);
+      } catch {
+        // 非法 payload 会在实际求值时按不透明规则处理；这里不拿它制造见证。
+      }
       continue;
     }
     if (rule.type !== 'DOMAIN-SUFFIX') continue;
@@ -130,18 +140,31 @@ function witnessesFor(pattern: DomainPattern, rules: MihomoRule[]): string[] {
     } catch {
       continue;
     }
-    if (domainPatternMatches(pattern, suffix)) witnesses.add(suffix);
-    else if (suffixMatches(pattern.apex, suffix)) witnesses.add(pattern.apex);
+    if (domainPatternMatches(pattern, suffix) || suffixMatches(pattern.apex, suffix)) suffixes.push(suffix);
   }
 
-  const exact = new Set(rules.filter((rule) => rule.type === 'DOMAIN').map((rule) => rule.payload));
-  let counter = 0;
-  let remainder = `afc-route-probe.${pattern.apex}`;
-  while (exact.has(remainder)) {
-    counter += 1;
-    remainder = `afc-route-probe-${counter}.${pattern.apex}`;
+  const representative = (apex: string, excludedSuffixes: string[]): string => {
+    for (let counter = 0; ; counter += 1) {
+      const label = counter === 0 ? 'afc-route-probe' : `afc-route-probe-${counter}`;
+      const candidate = `${label}.${apex}`;
+      if (!exact.has(candidate) && !excludedSuffixes.some((suffix) => suffixMatches(candidate, suffix))) {
+        return candidate;
+      }
+    }
+  };
+
+  for (const suffix of suffixes) {
+    if (domainPatternMatches(pattern, suffix)) witnesses.add(suffix);
+    const base = domainPatternMatches(pattern, suffix) ? suffix : pattern.apex;
+    const narrower = suffixes.filter((other) => other !== suffix && other.endsWith(`.${base}`));
+    witnesses.add(representative(base, narrower));
   }
-  witnesses.add(remainder);
+
+  const coversWholePattern = suffixes.some((suffix) => suffixMatches(pattern.apex, suffix));
+  if (!coversWholePattern) {
+    const narrower = suffixes.filter((suffix) => suffix.endsWith(`.${pattern.apex}`));
+    witnesses.add(representative(pattern.apex, narrower));
+  }
   return [...witnesses];
 }
 
