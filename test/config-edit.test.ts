@@ -5,12 +5,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
+  addDomainToConfigText,
   addTargetToConfigText,
+  removeDomainFromConfigText,
   removeTargetFromConfigText,
   renderTargetBlock,
   writeConfigText,
 } from '../src/config-edit.ts';
 import { loadConfig, type TargetConfig } from '../src/config.ts';
+import { DEFAULT_DOMAIN_TARGETS, type DomainTargetConfig } from '../src/targets/domain.ts';
 import { parseExpectedStatus, resolveWritePath } from '../src/cli/commands/add.ts';
 import { afcConfigPath, currentPlatform } from '../src/platform.ts';
 
@@ -37,6 +40,13 @@ targets:
       url: https://example.com/gpt
       expectedStatus: [405]
 `;
+
+const DOMAIN: DomainTargetConfig = {
+  pattern: 'example.com',
+  extraProbes: [],
+  countryAllow: [],
+  countryDeny: [],
+};
 
 test('新条目插进 targets 段，其它段落与注释不受影响', () => {
   const out = addTargetToConfigText(SAMPLE, TARGET);
@@ -177,5 +187,39 @@ test('没有现成配置时写到固定的用户级路径，而不是当前目�
     process.chdir(oldCwd);
     rmSync(dir, { recursive: true, force: true });
     rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
+test('首次新增域名会实体化内置默认值并保留注释', () => {
+  const out = addDomainToConfigText('# mine\ntargets: []\n', DOMAIN, true);
+  const doc = parseYaml(out) as { domains: { pattern: string }[] };
+  assert.match(out, /# mine/);
+  assert.deepEqual(doc.domains.map((d) => d.pattern), ['*.chatgpt.com', 'example.com']);
+});
+
+test('domains 空数组可以新增，删除末项后仍是空数组', () => {
+  const withDomain = addDomainToConfigText('domains: []\ntargets: []\n', DOMAIN, false);
+  assert.deepEqual((parseYaml(withDomain) as { domains: { pattern: string }[] }).domains, [{ pattern: 'example.com' }]);
+  const removed = removeDomainFromConfigText(withDomain, 'EXAMPLE.com.')!;
+  assert.deepEqual((parseYaml(removed) as { domains: unknown[] }).domains, []);
+});
+
+test('域名探测覆盖项写入后能完整加载', () => {
+  const custom: DomainTargetConfig = {
+    ...DEFAULT_DOMAIN_TARGETS[0]!,
+    pattern: 'api.example.com',
+    countryDeny: ['CN'],
+  };
+  const text = addDomainToConfigText('domains: []\ntargets: []\n', custom, false);
+  const dir = mkdtempSync(join(tmpdir(), 'afc-domain-edit-'));
+  try {
+    const path = join(dir, 'config.yaml');
+    writeConfigText(path, text);
+    const loaded = loadConfig(path).domains[0]!;
+    assert.equal(loaded.pattern, 'api.example.com');
+    assert.deepEqual(loaded.probe?.expectedStatus, [405]);
+    assert.deepEqual(loaded.countryDeny, ['CN']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -4,6 +4,11 @@ import { parse as parseYaml } from 'yaml';
 import { parseEndpointString } from './controller/discovery.ts';
 import { UsageError } from './errors.ts';
 import { afcConfigPath, currentPlatform } from './platform.ts';
+import {
+  DEFAULT_DOMAIN_TARGETS,
+  parseDomainPattern,
+  type DomainTargetConfig,
+} from './targets/domain.ts';
 
 /** 单个探测端点：以「期望状态码」判定节点对该目标是否可用。 */
 export interface ProbeEndpoint {
@@ -133,6 +138,7 @@ export interface AfcConfig {
   probe: ProbeSettings;
   schedule: ScheduleSettings;
   controller: ControllerSettings;
+  domains: DomainTargetConfig[];
   targets: TargetConfig[];
   /** 配置文件的实际来源路径；使用内置默认时为 undefined。 */
   sourcePath?: string;
@@ -342,6 +348,68 @@ function normalizeTarget(raw: unknown, index: number, problems: string[]): Targe
   };
 }
 
+function normalizeDomainTarget(raw: unknown, index: number, problems: string[]): DomainTargetConfig | undefined {
+  const where = `domains[${index}]`;
+  if (!isPlainObject(raw)) {
+    problems.push(`${where} 必须是对象`);
+    return undefined;
+  }
+
+  const rawPattern = raw['pattern'];
+  if (!isNonEmptyString(rawPattern)) {
+    problems.push(`${where}.pattern 缺失或为空`);
+    return undefined;
+  }
+
+  let pattern: string;
+  try {
+    pattern = parseDomainPattern(rawPattern).input;
+  } catch (err) {
+    problems.push(`${where}.pattern 无效：${(err as Error).message}`);
+    return undefined;
+  }
+
+  const probe = raw['probe'] === undefined || raw['probe'] === null
+    ? undefined
+    : normalizeEndpoint(raw['probe'], `${where}.probe`, problems);
+
+  const extraProbes: ProbeEndpoint[] = [];
+  const rawExtras = raw['extraProbes'];
+  if (rawExtras !== undefined && rawExtras !== null) {
+    if (!Array.isArray(rawExtras)) {
+      problems.push(`${where}.extraProbes 必须是数组`);
+    } else {
+      rawExtras.forEach((item, extraIndex) => {
+        const endpoint = normalizeEndpoint(item, `${where}.extraProbes[${extraIndex}]`, problems);
+        if (endpoint) extraProbes.push(endpoint);
+      });
+    }
+  }
+
+  let geoProbe: GeoProbe | undefined;
+  const rawGeo = raw['geoProbe'];
+  if (rawGeo !== undefined && rawGeo !== null) {
+    if (!isPlainObject(rawGeo) || !isNonEmptyString(rawGeo['url'])) {
+      problems.push(`${where}.geoProbe 必须是 { url: string } 对象`);
+    } else if (!/^https:\/\//.test(rawGeo['url'])) {
+      problems.push(`${where}.geoProbe.url 必须是 https 地址`);
+    } else if (rawGeo['format'] !== undefined && rawGeo['format'] !== 'cloudflare-trace') {
+      problems.push(`${where}.geoProbe.format 目前只支持 cloudflare-trace`);
+    } else {
+      geoProbe = { url: rawGeo['url'], format: 'cloudflare-trace' };
+    }
+  }
+
+  return {
+    pattern,
+    ...(probe ? { probe } : {}),
+    extraProbes,
+    ...(geoProbe ? { geoProbe } : {}),
+    countryAllow: normalizeStringList(raw['countryAllow'], `${where}.countryAllow`, problems),
+    countryDeny: normalizeStringList(raw['countryDeny'], `${where}.countryDeny`, problems),
+  };
+}
+
 function normalizeProbeSettings(raw: unknown, problems: string[]): ProbeSettings {
   if (raw === undefined || raw === null) return { ...DEFAULT_PROBE };
   if (!isPlainObject(raw)) {
@@ -486,6 +554,37 @@ export function loadConfig(explicitPath?: string): AfcConfig {
   const controller = normalizeController(rawDoc['controller'], problems);
   const schedule = normalizeSchedule(rawDoc['schedule'], problems);
 
+  let domains: DomainTargetConfig[];
+  const rawDomains = rawDoc['domains'];
+  if (rawDomains === undefined) {
+    domains = DEFAULT_DOMAIN_TARGETS.map((target) => ({
+      ...target,
+      ...(target.probe ? { probe: { ...target.probe, expectedStatus: [...target.probe.expectedStatus] } } : {}),
+      extraProbes: target.extraProbes.map((endpoint) => ({
+        ...endpoint,
+        expectedStatus: [...endpoint.expectedStatus],
+      })),
+      ...(target.geoProbe ? { geoProbe: { ...target.geoProbe } } : {}),
+      countryAllow: [...target.countryAllow],
+      countryDeny: [...target.countryDeny],
+    }));
+  } else if (!Array.isArray(rawDomains)) {
+    problems.push('domains 必须是数组');
+    domains = [];
+  } else {
+    domains = rawDomains
+      .map((target, index) => normalizeDomainTarget(target, index, problems))
+      .filter((target): target is DomainTargetConfig => target !== undefined);
+  }
+
+  const seenDomains = new Set<string>();
+  for (const domain of domains) {
+    if (seenDomains.has(domain.pattern)) {
+      problems.push(`域名范围 “${domain.pattern}” 重复；每个范围只能声明一次`);
+    }
+    seenDomains.add(domain.pattern);
+  }
+
   let targets: TargetConfig[];
   const rawTargets = rawDoc['targets'];
   if (rawTargets === undefined) {
@@ -519,7 +618,7 @@ export function loadConfig(explicitPath?: string): AfcConfig {
 
   if (problems.length > 0) throw new ConfigError(problems);
 
-  const config: AfcConfig = { probe, schedule, controller, targets };
+  const config: AfcConfig = { probe, schedule, controller, domains, targets };
   if (path) config.sourcePath = path;
   return config;
 }

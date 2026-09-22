@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { ConfigError, DEFAULT_TARGETS, loadConfig, requireTarget, resolveConfigPath } from '../src/config.ts';
 
@@ -68,4 +70,28 @@ test('未配置的组会给出配置指引', () => {
 test('resolveConfigPath 在显式路径存在时返回绝对路径', () => {
   const resolved = resolveConfigPath(fixture('minimal.yaml'));
   assert.ok(resolved?.endsWith('minimal.yaml'));
+});
+
+test('未声明 domains 时使用内置目标，显式空数组则禁用', () => {
+  assert.deepEqual(loadConfig(fixture('minimal.yaml')).domains.map((d) => d.pattern), ['*.chatgpt.com']);
+
+  const dir = mkdtempSync(join(tmpdir(), 'afc-domains-'));
+  const path = join(dir, 'empty.yaml');
+  try {
+    writeFileSync(path, 'domains: []\ntargets: []\n', 'utf8');
+    assert.deepEqual(loadConfig(path).domains, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('域名目标会归一化并拒绝重复项', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'afc-domain-normalize-'));
+  const path = join(dir, 'domains.yaml');
+  try {
+    writeFileSync(path, 'domains:\n  - pattern: "*.ChatGPT.com."\n  - pattern: "*.chatgpt.com"\ntargets: []\n', 'utf8');
+    assert.throws(() => loadConfig(path), /域名范围.*重复/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

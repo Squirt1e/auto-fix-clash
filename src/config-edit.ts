@@ -2,6 +2,11 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { loadConfig, type TargetConfig } from './config.ts';
+import {
+  DEFAULT_DOMAIN_TARGETS,
+  parseDomainPattern,
+  type DomainTargetConfig,
+} from './targets/domain.ts';
 
 /** 需要加引号的 YAML 标量（组名里可能有 emoji、冒号、井号等）。 */
 function yamlScalar(value: string): string {
@@ -39,6 +44,32 @@ export function renderTargetBlock(target: TargetConfig): string {
   return lines.join('\n') + '\n';
 }
 
+export function renderDomainBlock(target: DomainTargetConfig): string {
+  const lines: string[] = [`- pattern: ${yamlScalar(target.pattern)}`];
+  if (target.probe) {
+    lines.push('  probe:');
+    lines.push(`    url: ${target.probe.url}`);
+    lines.push(`    expectedStatus: [${target.probe.expectedStatus.join(', ')}]`);
+    if (target.probe.method && target.probe.method !== 'GET') lines.push(`    method: ${target.probe.method}`);
+  }
+  if (target.extraProbes.length > 0) {
+    lines.push('  extraProbes:');
+    for (const extra of target.extraProbes) {
+      lines.push(`    - url: ${extra.url}`);
+      lines.push(`      expectedStatus: [${extra.expectedStatus.join(', ')}]`);
+      if (extra.method && extra.method !== 'GET') lines.push(`      method: ${extra.method}`);
+    }
+  }
+  if (target.geoProbe) {
+    lines.push('  geoProbe:');
+    lines.push(`    url: ${target.geoProbe.url}`);
+    lines.push('    format: cloudflare-trace');
+  }
+  if (target.countryDeny.length > 0) lines.push(`  countryDeny: [${target.countryDeny.join(', ')}]`);
+  if (target.countryAllow.length > 0) lines.push(`  countryAllow: [${target.countryAllow.join(', ')}]`);
+  return lines.join('\n') + '\n';
+}
+
 const indent = (block: string, spaces: number): string =>
   block
     .replace(/\n$/, '')
@@ -54,6 +85,76 @@ function findTargetsEnd(lines: string[], targetsIndex: number): number {
     return i;
   }
   return lines.length;
+}
+
+function addBlocksToSection(text: string, section: string, blocks: string[]): string {
+  const rendered = blocks.map((block) => indent(block, 2));
+  const lines = text.split('\n');
+  const sectionIndex = lines.findIndex((line) => new RegExp(`^${section}:`).test(line));
+  if (sectionIndex < 0) {
+    const base = text.replace(/\s*$/, '');
+    return `${base}${base === '' ? '' : '\n\n'}${section}:\n${rendered.join('')}`;
+  }
+  if (new RegExp(`^${section}:\\s*\\[\\s*\\]\\s*$`).test(lines[sectionIndex]!)) {
+    lines[sectionIndex] = `${section}:`;
+  }
+  const end = findTargetsEnd(lines, sectionIndex);
+  let insertAt = end;
+  while (insertAt > sectionIndex + 1 && (lines[insertAt - 1] ?? '').trim() === '') insertAt -= 1;
+  return [
+    ...lines.slice(0, insertAt),
+    ...rendered.flatMap((block) => block.replace(/\n$/, '').split('\n')),
+    ...lines.slice(insertAt),
+  ].join('\n');
+}
+
+export function addDomainToConfigText(
+  text: string,
+  target: DomainTargetConfig,
+  materializeDefaults: boolean,
+): string {
+  const hasDomains = text.split('\n').some((line) => /^domains:/.test(line));
+  const targets = !hasDomains && materializeDefaults
+    ? [...DEFAULT_DOMAIN_TARGETS, target]
+    : [target];
+  return addBlocksToSection(text, 'domains', targets.map(renderDomainBlock));
+}
+
+export function removeDomainFromConfigText(text: string, requestedPattern: string): string | undefined {
+  const wanted = parseDomainPattern(requestedPattern).input;
+  const lines = text.split('\n');
+  const domainsIndex = lines.findIndex((line) => /^domains:/.test(line));
+  if (domainsIndex < 0) return undefined;
+  const sectionEnd = findTargetsEnd(lines, domainsIndex);
+  let start = -1;
+  for (let i = domainsIndex + 1; i < sectionEnd; i += 1) {
+    const match = /^\s{2}- pattern:\s*(.+?)\s*$/.exec(lines[i]!);
+    if (!match) continue;
+    const raw = match[1]!.replace(/^["']|["']$/g, '');
+    try {
+      if (parseDomainPattern(raw).input === wanted) {
+        start = i;
+        break;
+      }
+    } catch {
+      // 配置加载阶段会报告坏值；文本编辑只负责寻找可识别条目。
+    }
+  }
+  if (start < 0) return undefined;
+  let end = sectionEnd;
+  for (let i = start + 1; i < sectionEnd; i += 1) {
+    if (/^\s{2}- pattern:/.test(lines[i]!)) {
+      end = i;
+      break;
+    }
+  }
+  let trimmedEnd = end;
+  while (trimmedEnd > start && (lines[trimmedEnd - 1] ?? '').trim() === '') trimmedEnd -= 1;
+  const out = [...lines.slice(0, start), ...lines.slice(trimmedEnd)];
+  const nextEnd = findTargetsEnd(out, domainsIndex);
+  const hasEntry = out.slice(domainsIndex + 1, nextEnd).some((line) => /^\s{2}- pattern:/.test(line));
+  if (!hasEntry) out[domainsIndex] = 'domains: []';
+  return out.join('\n');
 }
 
 /**
