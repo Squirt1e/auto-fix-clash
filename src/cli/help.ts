@@ -119,19 +119,26 @@ const DOCTOR_HELP = `用法：afc doctor [选项]
   --verbose        额外打印判据与探测并发上限
 `;
 
-const FIX_HELP = `用法：afc fix [选项]
+const FIX_HELP = `用法：afc fix [域名|*.域名] [选项]
 
-先验证该组当前节点：可用就什么都不做；不可用才按顺序筛查候选，
-切换到第一个实测可用的节点（找到即停）。
+按当前 mihomo 规则找出该域名实际托管到的代理组，再验证当前节点；
+可用就保持，不可用才筛查候选。'*.chatgpt.com' 包含裸域 chatgpt.com
+及其所有子域名。请给 * 加引号，避免被 shell 展开。
 
 只通过控制端点改变组的选择，不写任何 Clash 配置。
+内置服务判据能验证服务能力；未知站点的默认判据只能证明 HTTPS 可达。
 
 选项：
+  --force           即使当前节点可用，也切到另一个实测可用节点
   --group <组名|编号>  只处理指定组
   --all            处理全部"该管的组"（默认行为）
   --no-auto        只处理配置里声明过的组
   --dry-run        只展示会怎么切，不写入
   --quiet          每次运行只留一行（计划任务用）
+
+例：
+  afc fix '*.chatgpt.com'
+  afc fix '*.chatgpt.com' --force
 `;
 
 export const COMMAND_HELP: Record<string, string> = {

@@ -1,0 +1,133 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { loadConfig, type AfcConfig } from '../src/config.ts';
+import type { MihomoClient, MihomoRule, ProxyInfo } from '../src/controller/client.ts';
+import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK } from '../src/exit-codes.ts';
+import type { GroupRepairOptions, RepairOutcome } from '../src/heal/repair.ts';
+import { policyForDomain, repairDomains } from '../src/heal/domain-repair.ts';
+import { formatRouteBinding } from '../src/cli/commands/fix.ts';
+import type { DomainTargetConfig } from '../src/targets/domain.ts';
+
+const rule = (index: number, type: string, payload: string, proxy: string): MihomoRule => ({
+  index, type, payload, proxy, size: -1,
+});
+
+function graph(): Record<string, ProxyInfo> {
+  return {
+    GPT: { name: 'GPT', type: 'Selector', now: 'A', all: ['A', 'B'] },
+    DEFAULT: { name: 'DEFAULT', type: 'Selector', now: 'A', all: ['A', 'B'] },
+    A: { name: 'A', type: 'Shadowsocks' },
+    B: { name: 'B', type: 'Shadowsocks' },
+  };
+}
+
+function fakeClient(rules: MihomoRule[]): MihomoClient {
+  const proxies = graph();
+  return {
+    configs: async () => ({ mode: 'rule' }),
+    rules: async () => rules,
+    proxies: async () => proxies,
+  } as unknown as MihomoClient;
+}
+
+const domain = (pattern: string): DomainTargetConfig => ({
+  pattern, extraProbes: [], countryAllow: [], countryDeny: [],
+});
+
+const kept = (group: string): RepairOutcome => ({
+  group, applied: false, probedNodes: 1, candidatesConsidered: 2,
+  plan: { action: 'keep', to: 'A', reason: 'ok' },
+});
+
+test('每个确认组只修复一次，同组的多个域名判据会合并', async () => {
+  const calls: GroupRepairOptions[] = [];
+  const report = await repairDomains({
+    config: loadConfig(),
+    targets: [domain('chatgpt.com'), domain('api.openai.com'), domain('other.example')],
+    client: fakeClient([
+      rule(0, 'DOMAIN', 'chatgpt.com', 'GPT'),
+      rule(1, 'DOMAIN', 'api.openai.com', 'GPT'),
+      rule(2, 'MATCH', '', 'DEFAULT'),
+    ]),
+    repairer: async (options) => { calls.push(options); return kept(options.groupName); },
+  });
+  assert.deepEqual(calls.map((call) => call.groupName).sort(), ['DEFAULT', 'GPT']);
+  assert.equal(calls.find((call) => call.groupName === 'GPT')?.policies.length, 2);
+  assert.equal(report.exitCode, EXIT_OK);
+});
+
+test('不透明规则造成退出码 3，但不隐藏此前已确认组的成功结果', async () => {
+  const report = await repairDomains({
+    config: loadConfig(),
+    targets: [domain('api.example.com'), domain('opaque.example.com')],
+    client: fakeClient([
+      rule(0, 'DOMAIN', 'api.example.com', 'GPT'),
+      rule(1, 'RULE-SET', 'opaque', 'DEFAULT'),
+      rule(2, 'MATCH', '', 'DEFAULT'),
+    ]),
+    repairer: async (options) => kept(options.groupName),
+  });
+  assert.equal(report.outcomes.length, 1);
+  assert.equal(report.outcomes[0]?.group, 'GPT');
+  assert.equal(report.exitCode, EXIT_ENVIRONMENT);
+  assert.equal(report.issues[0]?.kind, 'unresolved-rule');
+});
+
+test('任一组没有替代节点时聚合为退出码 2', async () => {
+  const report = await repairDomains({
+    config: loadConfig(), targets: [domain('example.com')],
+    client: fakeClient([rule(0, 'MATCH', '', 'DEFAULT')]),
+    repairer: async (options) => ({
+      ...kept(options.groupName),
+      plan: { action: 'no-candidate', from: 'A', reason: 'none' },
+    }),
+  });
+  assert.equal(report.exitCode, EXIT_NO_USABLE_NODE);
+});
+
+test('探测策略优先使用显式覆盖，其次 ChatGPT 服务判据，最后通用 HTTPS 可达性', () => {
+  const explicit = policyForDomain({
+    ...domain('api.example.com'),
+    probe: { url: 'https://probe.example/status', expectedStatus: [204] },
+  }, 'api.example.com');
+  assert.equal(explicit.target.probe.url, 'https://probe.example/status');
+  assert.equal(explicit.confidence, 'service');
+
+  const chatgpt = policyForDomain(domain('*.chatgpt.com'), 'chatgpt.com');
+  assert.equal(chatgpt.target.probe.url, 'https://chatgpt.com/backend-api/codex/responses');
+  assert.equal(chatgpt.confidence, 'service');
+
+  const generic = policyForDomain(domain('example.com'), 'example.com');
+  assert.deepEqual(generic.target.probe, { url: 'https://example.com/', expectedStatus: [200, 399], method: 'GET' });
+  assert.equal(generic.confidence, 'reachability');
+});
+
+test('协调器只读取一次实时配置、规则和代理表，并透传 force', async () => {
+  const counts = { configs: 0, rules: 0, proxies: 0 };
+  let seenForce = false;
+  const base = fakeClient([rule(0, 'MATCH', '', 'DEFAULT')]) as unknown as Record<string, (...args: unknown[]) => unknown>;
+  const client = {
+    configs: async () => { counts.configs += 1; return await base['configs']!(); },
+    rules: async () => { counts.rules += 1; return await base['rules']!(); },
+    proxies: async () => { counts.proxies += 1; return await base['proxies']!(); },
+  } as unknown as MihomoClient;
+  await repairDomains({
+    config: loadConfig(), targets: [domain('example.com')], client, force: true,
+    repairer: async (options) => { seenForce = options.force === true; return kept(options.groupName); },
+  });
+  assert.deepEqual(counts, { configs: 1, rules: 1, proxies: 1 });
+  assert.equal(seenForce, true);
+});
+
+test('路由输出包含域名、规则依据、代理组和判据可信度', async () => {
+  const target = domain('example.com');
+  const report = await repairDomains({
+    config: loadConfig(), targets: [target],
+    client: fakeClient([rule(0, 'MATCH', '', 'DEFAULT')]),
+    repairer: async (options) => kept(options.groupName),
+  });
+  const text = formatRouteBinding(report.bindings[0]!, [target]);
+  assert.match(text, /example\.com → DEFAULT/);
+  assert.match(text, /规则 #0 MATCH/);
+  assert.match(text, /只能证明 HTTPS 可达/);
+});

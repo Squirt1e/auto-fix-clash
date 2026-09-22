@@ -113,6 +113,7 @@ export async function main(argv: string[]): Promise<number> {
         expect: { type: 'string' },
         'country-deny': { type: 'string' },
         force: { type: 'boolean', default: false },
+        scheduled: { type: 'boolean', default: false },
         verbose: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
         version: { type: 'boolean', short: 'v', default: false },

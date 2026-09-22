@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { main } from '../src/cli/index.ts';
 import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK, EXIT_USAGE } from '../src/exit-codes.ts';
+import { resolveFixRequest } from '../src/cli/commands/fix.ts';
+import { DEFAULT_DOMAIN_TARGETS } from '../src/targets/domain.ts';
 
 /** 捕获 main() 写到 stdout/stderr 的内容。 */
 async function capture(argv: string[]): Promise<{ code: number; out: string; err: string }> {
@@ -123,4 +125,43 @@ test('schedule 的未知子命令返回用法错误退出码', async () => {
   const result = await capture(['schedule', 'nosuchsub']);
   assert.equal(result.code, EXIT_USAGE);
   assert.match(result.err, /未知的 schedule 子命令/);
+});
+
+test('fix 位置参数选择域名模式并透传 force', () => {
+  const request = resolveFixRequest({
+    positionals: ['*.ChatGPT.com.'],
+    values: { force: true },
+  }, DEFAULT_DOMAIN_TARGETS);
+  assert.equal(request.mode, 'domain');
+  if (request.mode !== 'domain') return;
+  assert.deepEqual(request.targets.map((target) => target.pattern), ['*.chatgpt.com']);
+  assert.equal(request.force, true);
+});
+
+test('没有位置参数和旧组选项时读取已配置域名', () => {
+  const request = resolveFixRequest({ positionals: [], values: {} }, DEFAULT_DOMAIN_TARGETS);
+  assert.equal(request.mode, 'domain');
+  if (request.mode !== 'domain') return;
+  assert.deepEqual(request.targets, DEFAULT_DOMAIN_TARGETS);
+});
+
+test('显式组选项保留旧模式，域名不能和 --group 混用', async () => {
+  assert.equal(resolveFixRequest({ positionals: [], values: { group: 'GPT', force: true } }, []).mode, 'legacy');
+  const result = await capture(['fix', 'example.com', '--group', 'GPT']);
+  assert.equal(result.code, EXIT_USAGE);
+  assert.match(result.err, /不能.*同时/);
+});
+
+test('计划任务模式拒绝 --force', async () => {
+  const result = await capture(['fix', '--scheduled', '--force']);
+  assert.equal(result.code, EXIT_USAGE);
+  assert.match(result.err, /计划任务.*--force/);
+});
+
+test('fix 帮助说明通配符包含裸域、通用可达性和 force', async () => {
+  const { out } = await capture(['fix', '--help']);
+  assert.match(out, /'\*\.chatgpt\.com'/);
+  assert.match(out, /包含裸域/);
+  assert.match(out, /--force/);
+  assert.match(out, /只能证明 HTTPS 可达/);
 });
