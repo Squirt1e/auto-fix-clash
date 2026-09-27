@@ -215,3 +215,99 @@ test('非法域名正则明确报告不确定而不是崩溃或跳过', async ()
   assert.equal(result.issues[0]?.ruleIndex, 4);
   assert.match(result.issues[0]?.reason ?? '', /规则 #5.*正则/);
 });
+
+test('普通 CIDR 未命中时继续到域名规则，命中时采用 CIDR 策略', async () => {
+  const cidr = { ...rule(0, 'IPCIDR', '10.0.0.0/8', 'API'), noResolve: false };
+  const miss = await resolveDomainRoutes(
+    [parseDomainPattern('chatgpt.com')],
+    [cidr, rule(1, 'DomainSuffix', 'chatgpt.com', 'MEDIA')],
+    proxies(),
+    'rule',
+    { resolveAddresses: async () => ['23.101.24.70'] },
+  );
+  assert.deepEqual(miss.bindings.map((binding) => binding.group), ['MEDIA']);
+
+  const hit = await resolveDomainRoutes(
+    [parseDomainPattern('chatgpt.com')],
+    [{ ...rule(0, 'IPCIDR', '23.0.0.0/8', 'API'), noResolve: false }, rule(1, 'MATCH', '', 'DEFAULT')],
+    proxies(),
+    'rule',
+    { resolveAddresses: async () => ['23.101.24.70'] },
+  );
+  assert.deepEqual(hit.bindings.map((binding) => binding.group), ['API']);
+});
+
+test('多个 DNS 地址只有在最终策略一致时才确认并保留各自规则依据', async () => {
+  const rules = [
+    { ...rule(0, 'IPCIDR', '10.0.0.0/8', 'API'), noResolve: false },
+    { ...rule(1, 'IPCIDR', '192.168.0.0/16', 'API'), noResolve: false },
+    rule(2, 'MATCH', '', 'DEFAULT'),
+  ];
+  const result = await resolveDomainRoutes(
+    [parseDomainPattern('example.com')], rules, proxies(), 'rule',
+    { resolveAddresses: async () => ['10.0.0.1', '192.168.1.1'] },
+  );
+  assert.deepEqual(result.bindings.map((binding) => binding.group), ['API']);
+  assert.deepEqual(result.bindings[0]?.evidence.map((evidence) => evidence.rule.index), [0, 1]);
+});
+
+test('多个 DNS 地址落到不同策略时保持不确定', async () => {
+  const result = await resolveDomainRoutes(
+    [parseDomainPattern('example.com')],
+    [
+      { ...rule(0, 'IPCIDR', '10.0.0.0/8', 'API'), noResolve: false },
+      { ...rule(1, 'IPCIDR', '192.168.0.0/16', 'MEDIA'), noResolve: false },
+      rule(2, 'MATCH', '', 'DEFAULT'),
+    ],
+    proxies(), 'rule',
+    { resolveAddresses: async () => ['10.0.0.1', '192.168.1.1'] },
+  );
+  assert.equal(result.bindings.length, 0);
+  assert.match(result.issues[0]?.reason ?? '', /DNS.*不同策略/);
+});
+
+test('DNS 空结果或查询失败时保持不确定', async () => {
+  for (const implementation of [
+    async (): Promise<string[]> => [],
+    async (): Promise<string[]> => { throw new Error('resolver down'); },
+  ]) {
+    let calls = 0;
+    const resolveAddresses = async (): Promise<string[]> => {
+      calls += 1;
+      return await implementation();
+    };
+    const result = await resolveDomainRoutes(
+      [parseDomainPattern('example.com')],
+      [{ ...rule(0, 'IPCIDR', '10.0.0.0/8', 'API'), noResolve: false }, rule(1, 'MATCH', '', 'DEFAULT')],
+      proxies(), 'rule', { resolveAddresses },
+    );
+    assert.equal(result.bindings.length, 0);
+    assert.match(result.issues[0]?.reason ?? '', /DNS/);
+    assert.equal(calls, 1);
+  }
+});
+
+test('前序 IP 规则触发解析后，后续 no-resolve 规则使用已有地址', async () => {
+  const result = await resolveDomainRoutes(
+    [parseDomainPattern('example.com')],
+    [
+      { ...rule(0, 'IPCIDR', '10.0.0.0/8', 'API'), noResolve: false },
+      { ...rule(1, 'IPCIDR', '192.168.0.0/16', 'MEDIA'), noResolve: true },
+      rule(2, 'MATCH', '', 'DEFAULT'),
+    ],
+    proxies(), 'rule',
+    { resolveAddresses: async () => ['192.168.1.1'] },
+  );
+  assert.deepEqual(result.bindings.map((binding) => binding.group), ['MEDIA']);
+});
+
+test('非法 CIDR 明确报告不确定', async () => {
+  const result = await resolveDomainRoutes(
+    [parseDomainPattern('example.com')],
+    [{ ...rule(3, 'IPCIDR', '10.0.0.0/99', 'API'), noResolve: false }, rule(4, 'MATCH', '', 'DEFAULT')],
+    proxies(), 'rule',
+    { resolveAddresses: async () => ['10.0.0.1'] },
+  );
+  assert.equal(result.bindings.length, 0);
+  assert.match(result.issues[0]?.reason ?? '', /规则 #4.*CIDR/);
+});

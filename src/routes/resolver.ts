@@ -11,6 +11,7 @@ import {
   type DomainPattern,
 } from '../targets/domain.ts';
 import { enrichLiveRules, type RuntimeRuleMetadata } from './runtime-rules.ts';
+import { ipInCidr } from './ip-cidr.ts';
 
 export type RouteIssueKind =
   | 'unsupported-mode'
@@ -184,14 +185,16 @@ function witnessesFor(pattern: DomainPattern, rules: MihomoRule[]): string[] {
 
 type RuleEvaluation =
   | { rule: MihomoRule }
+  | { resolveAt: number; rule: MihomoRule }
   | { issue: { kind: 'unresolved-rule' | 'no-match'; reason: string; ruleIndex?: number } };
 
 type RuleDecision =
   | { kind: 'match' }
   | { kind: 'miss' }
+  | { kind: 'resolve' }
   | { kind: 'unknown'; reason: string };
 
-function evaluateRule(rule: MihomoRule, host: string, destinationResolved: boolean): RuleDecision {
+function evaluateRule(rule: MihomoRule, host: string, destinationAddress?: string): RuleDecision {
   if (rule.type === 'DOMAIN') return { kind: host === rule.payload ? 'match' : 'miss' };
   if (rule.type === 'DOMAIN-SUFFIX') return { kind: suffixMatches(host, rule.payload) ? 'match' : 'miss' };
   if (rule.type === 'DOMAIN-KEYWORD') return { kind: host.includes(rule.payload) ? 'match' : 'miss' };
@@ -211,19 +214,30 @@ function evaluateRule(rule: MihomoRule, host: string, destinationResolved: boole
   }
   if (rule.type === 'MATCH') return { kind: 'match' };
   if (rule.type === 'IP-CIDR' || rule.type === 'IP-CIDR6') {
-    if (rule.noResolve === true && !destinationResolved) return { kind: 'miss' };
+    if (destinationAddress !== undefined) {
+      const matched = ipInCidr(destinationAddress, rule.payload);
+      if (matched === undefined) return { kind: 'unknown', reason: 'CIDR 表达式无效' };
+      return { kind: matched ? 'match' : 'miss' };
+    }
+    if (rule.noResolve === true) return { kind: 'miss' };
     if (rule.noResolve === undefined) {
       return { kind: 'unknown', reason: '运行时规则缺少 no-resolve 修饰符证据' };
     }
-    return { kind: 'unknown', reason: '目标 IP 规则需要通过 mihomo DNS 判定' };
+    return { kind: 'resolve' };
   }
   return { kind: 'unknown', reason: '无法仅凭域名可靠判定' };
 }
 
-function evaluateRules(host: string, rules: MihomoRule[]): RuleEvaluation {
-  for (const rule of rules) {
+function evaluateRules(
+  host: string,
+  rules: MihomoRule[],
+  startAt = 0,
+  destinationAddress?: string,
+): RuleEvaluation {
+  for (let position = startAt; position < rules.length; position += 1) {
+    const rule = rules[position]!;
     if (rule.extra?.disabled) continue;
-    const decision = evaluateRule(rule, host, false);
+    const decision = evaluateRule(rule, host, destinationAddress);
     if (decision.kind === 'unknown') {
       return {
         issue: {
@@ -233,6 +247,7 @@ function evaluateRules(host: string, rules: MihomoRule[]): RuleEvaluation {
         },
       };
     }
+    if (decision.kind === 'resolve') return { resolveAt: position, rule };
     if (decision.kind === 'match') return { rule };
   }
   return { issue: { kind: 'no-match', reason: `没有规则匹配 ${host}` } };
@@ -267,45 +282,97 @@ export async function resolveDomainRoutes(
   const rules = enrichLiveRules(rawRules, options.runtimeRules)
     .map(normalizedRule)
     .sort((a, b) => a.index - b.index);
+  const dnsCache = new Map<string, Promise<readonly string[]>>();
+  const evaluateWitness = async (host: string): Promise<RuleEvaluation[]> => {
+    const initial = evaluateRules(host, rules);
+    if (!('resolveAt' in initial)) return [initial];
+    if (!options.resolveAddresses) {
+      return [{ issue: {
+        kind: 'unresolved-rule',
+        ruleIndex: initial.rule.index,
+        reason: `规则 #${initial.rule.index + 1} ${initial.rule.type} 需要 mihomo DNS，但解析器不可用`,
+      } }];
+    }
+    try {
+      let lookup = dnsCache.get(host);
+      if (!lookup) {
+        lookup = options.resolveAddresses(host);
+        dnsCache.set(host, lookup);
+      }
+      const addresses = [...new Set(await lookup)];
+      if (addresses.length === 0) {
+        return [{ issue: {
+          kind: 'unresolved-rule',
+          ruleIndex: initial.rule.index,
+          reason: `规则 #${initial.rule.index + 1} ${initial.rule.type} 的 mihomo DNS 没有返回地址`,
+        } }];
+      }
+      return addresses.map((address) => evaluateRules(host, rules, initial.resolveAt, address));
+    } catch (error) {
+      return [{ issue: {
+        kind: 'unresolved-rule',
+        ruleIndex: initial.rule.index,
+        reason: `规则 #${initial.rule.index + 1} ${initial.rule.type} 的 mihomo DNS 查询失败：${(error as Error).message}`,
+      } }];
+    }
+  };
   for (const pattern of patterns) {
     for (const witness of witnessesFor(pattern, rules)) {
-      const evaluation = evaluateRules(witness, rules);
-      if ('issue' in evaluation) {
-        issues.push({ pattern: pattern.input, witness, ...evaluation.issue });
+      const evaluations = await evaluateWitness(witness);
+      const failed = evaluations.find((evaluation) => 'issue' in evaluation);
+      if (failed && 'issue' in failed) {
+        issues.push({ pattern: pattern.input, witness, ...failed.issue });
         continue;
       }
-      const policy = resolvePolicy(evaluation.rule.proxy, proxies);
-      if (!policy.group) {
+      const matchedRules = evaluations.flatMap((evaluation) => 'rule' in evaluation ? [evaluation.rule] : []);
+      const policies = matchedRules.map((rule) => ({ rule, resolution: resolvePolicy(rule.proxy, proxies) }));
+      const outcomes = new Set(policies.map(({ resolution }) => resolution.group
+        ? `group:${resolution.group}`
+        : `issue:${resolution.issue?.kind ?? 'policy-missing'}:${resolution.issue?.reason ?? ''}`));
+      if (outcomes.size > 1) {
         issues.push({
           pattern: pattern.input,
           witness,
-          kind: policy.issue?.kind ?? 'policy-missing',
-          reason: policy.issue?.reason ?? `策略 ${evaluation.rule.proxy} 无法解析`,
+          kind: 'unresolved-rule',
+          reason: `mihomo DNS 的不同地址落到不同策略：${[...new Set(matchedRules.map((rule) => rule.proxy))].join('、')}`,
         });
         continue;
       }
-      const evidence: RouteEvidence = {
-        pattern: pattern.input,
-        witness,
-        rule: evaluation.rule,
-        policy: evaluation.rule.proxy,
-        chain: policy.chain,
-      };
-      const existing = bindingsByGroup.get(policy.group);
-      if (existing) {
-        if (!existing.evidence.some((item) =>
-          item.pattern === evidence.pattern && item.witness === evidence.witness && item.rule.index === evidence.rule.index)) {
-          existing.evidence.push(evidence);
-        }
-      } else {
-        bindingsByGroup.set(policy.group, {
+      const first = policies[0];
+      if (!first) continue;
+      if (!first.resolution.group) {
+        issues.push({
           pattern: pattern.input,
           witness,
-          rule: evaluation.rule,
-          policy: evaluation.rule.proxy,
-          group: policy.group,
-          evidence: [evidence],
+          kind: first.resolution.issue?.kind ?? 'policy-missing',
+          reason: first.resolution.issue?.reason ?? `策略 ${first.rule.proxy} 无法解析`,
         });
+        continue;
+      }
+      for (const { rule, resolution: policy } of policies) {
+        const evidence: RouteEvidence = {
+          pattern: pattern.input,
+          witness,
+          rule,
+          policy: rule.proxy,
+          chain: policy.chain,
+        };
+        const existing = bindingsByGroup.get(first.resolution.group);
+        if (existing) {
+          if (!existing.evidence.some((item) =>
+            item.pattern === evidence.pattern && item.witness === evidence.witness && item.rule.index === evidence.rule.index)) {
+            existing.evidence.push(evidence);
+          }
+        } else {
+          bindingsByGroup.set(first.resolution.group, {
+            pattern: pattern.input,
+            witness,
+            rule,
+            policy: rule.proxy,
+            group: first.resolution.group,
+            evidence: [evidence],
+          });
+        }
       }
     }
   }

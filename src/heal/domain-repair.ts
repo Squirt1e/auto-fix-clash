@@ -143,7 +143,10 @@ export async function repairDomains(options: RepairDomainsOptions): Promise<Doma
     rules,
     proxies,
     typeof configs['mode'] === 'string' ? configs['mode'] : '',
-    options.runtimeRules ? { runtimeRules: options.runtimeRules } : {},
+    {
+      ...(options.runtimeRules ? { runtimeRules: options.runtimeRules } : {}),
+      resolveAddresses: async (host) => await options.client.resolveHost(host),
+    },
   );
   const targetsByPattern = new Map(options.targets.map((target) => [
     parseDomainPattern(target.pattern).input,

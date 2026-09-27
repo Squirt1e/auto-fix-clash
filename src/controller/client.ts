@@ -1,4 +1,5 @@
 import { HttpError, rawRequest, type ControllerEndpoint } from './http.ts';
+import { isIP } from 'node:net';
 
 export interface ProxyHistoryEntry {
   time: string;
@@ -116,6 +117,34 @@ export class MihomoClient {
   async rules(): Promise<MihomoRule[]> {
     const res = await this.call<{ rules: MihomoRule[] }>('GET', '/rules');
     return Array.isArray(res.rules) ? res.rules : [];
+  }
+
+  async resolveHost(name: string): Promise<string[]> {
+    const query = async (type: 'A' | 'AAAA'): Promise<string[]> => {
+      const params = new URLSearchParams({ name, type });
+      const response = await this.call<{ Status?: unknown; Answer?: unknown }>(
+        'GET',
+        `/dns/query?${params.toString()}`,
+      );
+      if (response.Status !== 0) throw new Error(`mihomo DNS 查询 ${name} ${type} 失败：状态 ${String(response.Status)}`);
+      if (response.Answer === undefined) return [];
+      if (!Array.isArray(response.Answer)) throw new Error(`mihomo DNS 查询 ${name} ${type} 的 Answer 格式无效`);
+      const addresses: string[] = [];
+      for (const answer of response.Answer) {
+        if (typeof answer !== 'object' || answer === null) {
+          throw new Error(`mihomo DNS 查询 ${name} ${type} 的回答格式无效`);
+        }
+        const record = answer as { type?: unknown; data?: unknown };
+        if (record.type !== 1 && record.type !== 28) continue;
+        if (typeof record.data !== 'string' || isIP(record.data) === 0) {
+          throw new Error(`mihomo DNS 查询 ${name} ${type} 返回了无效地址`);
+        }
+        addresses.push(record.data);
+      }
+      return addresses;
+    };
+    const [ipv4, ipv6] = await Promise.all([query('A'), query('AAAA')]);
+    return [...new Set([...ipv4, ...ipv6])];
   }
 
   async proxy(name: string): Promise<ProxyInfo> {

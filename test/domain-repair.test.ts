@@ -92,6 +92,29 @@ test('协调器用运行时 no-resolve 证据越过私网规则并修复域名�
   assert.deepEqual(report.issues, []);
 });
 
+test('协调器把 mihomo DNS 交给普通 IP-CIDR 路由判定', async () => {
+  const client = fakeClient([
+    rule(0, 'IPCIDR', '23.0.0.0/8', 'GPT'),
+    rule(1, 'MATCH', '', 'DEFAULT'),
+  ]) as unknown as MihomoClient & { resolveHost: (host: string) => Promise<string[]> };
+  client.resolveHost = async (host) => {
+    assert.equal(host, 'chatgpt.com');
+    return ['23.101.24.70'];
+  };
+  const report = await repairDomains({
+    config: loadConfig(),
+    targets: [domain('chatgpt.com')],
+    client,
+    runtimeRules: [
+      { index: 0, type: 'IP-CIDR', payload: '23.0.0.0/8', proxy: 'GPT', noResolve: false },
+      { index: 1, type: 'MATCH', payload: '', proxy: 'DEFAULT', noResolve: false },
+    ],
+    repairer: async (options) => kept(options.groupName),
+  });
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.deepEqual(report.outcomes.map((outcome) => outcome.group), ['GPT']);
+});
+
 test('任一组没有替代节点时聚合为退出码 2', async () => {
   const report = await repairDomains({
     config: loadConfig(), targets: [domain('example.com')],
