@@ -1,114 +1,34 @@
 # afc — 让 Clash 代理组自动选中「真正能用」的节点
 
-> Clash / mihomo（Clash Meta）代理组自动测速与自愈工具：给它一个稳定的**域名范围**（如 `*.chatgpt.com`），
-> 它按当前 mihomo 规则找出实际承载流量的代理组，直连 ChatGPT、Codex 等目标站点判定节点真实可用性，
-> 当前节点挂了自动切换，一条命令装好定时巡检。支持 macOS / Linux / Windows，兼容 Clash Party、Clash Verge（Rev）、ClashX Meta 与任意 mihomo 内核。
+[English](README.en.md) · Clash / mihomo（Clash Meta）代理组自动测速与自愈。
 
-## 你是否也遇到过这些情况？
+给它一个稳定的**域名范围**（如 `*.chatgpt.com`），它按当前 mihomo 规则找出实际承载流量的代理组，
+再**直接请求目标站点看真实响应**，当前节点挂了自动换。不信延迟也不信节点名：直连
+`chatgpt.com/backend-api/codex/responses`，回 `405` 才算可用，`403` 说明出口被地区封。
+
+- 认**域名**而不是组名：每次从 `/rules`、`/proxies`、`/configs` 实时解析，订阅改名改组后自己重新定位
+- 只通过控制端点切换组的选中节点，**不写任何 Clash 配置**
+- 支持 macOS / Linux / Windows，兼容 Clash Party、Clash Verge（Rev）、ClashX Meta 与任意 mihomo 内核
+
+## 解决什么问题
 
 - 打开 Codex 或 ChatGPT 突然用不了，只能去 Clash 里一个个节点试，试到能连为止
 - 延迟最低的那批节点（香港，400ms）偏偏全都用不了；能用的美国节点反而要 900ms
-- 叫「香港 20」的节点，实测出口在日本
-- 昨天挑好的节点今天又挂了
+- 叫「香港 20」的节点实测出口在日本，昨天挑好的节点今天又挂了
 
-afc 帮你自动挑节点：你给它一个稳定的域名范围，它按 mihomo 当前规则找出实际承载流量的代理组，
-再**直接请求目标站点、看它的真实响应**；订阅更新后即使组名变了，也会在下一次运行时重新定位。
-
-## 快速开始
+## 安装与使用
 
 ```bash
-npm i -g auto-fix-clash   # 要求 Node.js ≥ 20（macOS / Linux / Windows）
-afc fix '*.chatgpt.com'   # 立即修复；引号避免 shell 展开 *
-afc schedule install      # 每 5 分钟按已登记域名重新解析路由并修复
+npm i -g auto-fix-clash            # 要求 Node.js ≥ 20
+afc fix '*.chatgpt.com'            # 立即修复（引号避免 shell 展开 *）
+afc schedule install               # 装好后每 5 分钟自动巡检
+afc schedule add '*.example.com'   # 想管别的站点：登记范围
+afc schedule list                  # 查看已登记范围
 ```
 
-看看它在不在跑：
-
-```bash
-$ afc schedule status
-周期性修复任务：运行中，后端 launchd，每 300 秒
-  最近一次：2026-09-27 21:28:13 GPT：保持 [Normal x0.5] 日本 03（可用）
-  配置：/Users/you/.config/afc/config.yaml
-  域名范围：*.chatgpt.com
-  卸载：afc schedule uninstall　（--verbose 查看定义文件与日志路径）
-```
-
-不想用了，一条命令撤掉：
-
-```bash
-afc schedule uninstall    # 不会改动你的任何 Clash 配置
-```
-
-## 它会做什么
-
-- 默认处理 `*.chatgpt.com`；这里的 `*.` **同时包含裸域** `chatgpt.com` 和任意层级子域名
-- 每次从当前 `/rules`、`/proxies`、`/configs` 解析域名实际经过的所有可确认代理组；落到 `MATCH` 的路径也会修复
-- 检查每个确认组的**当前节点**：能用就不动；不能用了才扫描候选、换成满足该域名全部判据的节点
-- **只通过控制端点改变组的选中节点，不写任何 Clash 配置**
-- 不会碰 `DIRECT`/`REJECT` 等内建策略，也不会强行钉住 URLTest、Fallback、LoadBalance 等自动组
-- 能识别 `no-resolve`，并用 mihomo 自己的 DNS 结果判断普通 `IP-CIDR`/`IP-CIDR6`；多个地址必须得出同一策略才算确认
-- 遇到 `RULE-SET`、`GEOSITE`、GEOIP/ASN、进程或入站条件等仍无法可靠证明的规则时，已确认的组仍会修复，但结果标为“不完整”并返回退出码 3
-- ChatGPT 使用服务专用判据；其它域名默认的 HTTPS 200–399 只证明“可达”，不代表登录或全部业务功能可用
-
-定时任务由系统自带的调度器承担，后端按平台自动选择，一般不用管：
-
-| 系统 | 用什么调度 | 想查看任务 |
-|---|---|---|
-| macOS | launchd | 系统设置 → 通用 → 登录项与扩展 |
-| Linux | systemd 用户定时器（没有 systemd 时自动退回 cron） | `systemctl --user list-timers afc-heal.timer` |
-| Windows | 任务计划程序 | 任务计划程序里名为 `auto-fix-clash-heal` 的任务（经 `wscript` + 隐藏启动器运行，不弹窗口） |
-
-需要强制指定后端（例如容器里没有 systemd）：
-
-```bash
-afc schedule install --backend cron
-afc schedule install --dry-run      # 先看将要写入的任务定义
-```
-
-后端名字：`launchd`、`systemd`、`cron`、`schtasks`。两处平台差异值得知道：
-
-- **Linux**：任务跟着你的登录会话跑。没登录也要跑，执行一次 `loginctl enable-linger $USER`。
-- **Windows**：任务以当前用户身份运行，不需要管理员权限。任务计划程序不记录程序输出，
-  所以 afc 自己把日志写到 `%LOCALAPPDATA%\afc\logs` —— `afc schedule status` 能看到最近一次的结果。
-
-## 常用命令
-
-| 命令 | 作用 |
-|---|---|
-| `afc schedule install` | 装定时自动修复（最常用） |
-| `afc schedule add '*.example.com'` | 登记定时修复域名范围 |
-| `afc schedule list` | 查看定时修复域名 |
-| `afc schedule remove '*.example.com'` | 移除定时修复域名 |
-| `afc schedule status` | 看它是否在跑、最近做了什么 |
-| `afc schedule uninstall` | 卸载 |
-| `afc groups` | 当前订阅有哪些组、哪些会被照顾 |
-| `afc doctor` | 逐节点体检并打印判定表（**按组**，不接受域名参数；域名请用 `afc fix <域名> --dry-run`） |
-| `afc fix '*.chatgpt.com'` | 解析该域名范围并立刻修复所有确认组 |
-| `afc fix '*.chatgpt.com' --force` | 即使当前节点可用，也换到另一个实测可用节点 |
-
-任何命令加 `--help` 看详细用法，例如 `afc add --help`。
+`*.` **同时包含裸域**和任意层级子域名。不想用了：`afc schedule uninstall`。自定义站点若不能用通用状态码判断，给 `afc schedule add` 加 `--url` / `--expect`（还可加 `--country-deny`），详见 `afc schedule --help`。
 
 ## 看看效果
-
-体检 —— 每个节点到底行不行：
-
-```bash
-$ afc doctor
-GPT　当前：[Normal x0.5] 日本 03　候选 38 个
-
-节点                          判定    状态码  出口  耗时
---------------------------------------------------------------
-  [Normal x0.5] 日本 06       可用    405     JP    606ms
-* [Normal x0.5] 日本 03       可用    405     JP    729ms
-  [Normal] 美国 03            可用    405     US    857ms
-  [Normal x0.5] 香港 06       被拒绝  403     HK    366ms
-  [Normal x0.5] 香港 01       被拒绝  403     HK    571ms
-  [Normal x0.5] 日本 01       死节点  —       —     —
-
-可用 14　被拒绝 13　国家受限 0　死节点 11　共 38（* 为当前节点）
-```
-
-当前节点坏掉时自动换：
 
 ```bash
 $ afc fix '*.chatgpt.com'
@@ -118,203 +38,43 @@ $ afc fix '*.chatgpt.com'
 GPT：已切换 [Normal x0.5] 日本 02 → [Normal x0.5] 日本 03
 ```
 
-`规则 #N` 是人看的**一基编号**（`--verbose` 会另附 `(API index N-1)` 供对照控制 API）；
-`afc-route-probe.chatgpt.com` 是 afc 为通配范围生成的代表性子域 —— 每个见证域名都独立把当前规则走一遍，
-最后的「已切换 / 保持」才是对组的实际操作。
+`规则 #N` 是人看的一基编号（`--verbose` 时另附 `(API index N-1)` 供对照控制 API）。当前节点可用时
+什么都不做，只探测这一个节点（约 2 秒），最后一行变成 `GPT：保持 …（可用）`；`--force` 会主动轮换。
 
-当前节点还好时什么都不做，只探测这一个节点（约 2 秒）：
+## 常用命令
 
-```bash
-$ afc fix '*.chatgpt.com'
-*.chatgpt.com → GPT
-  chatgpt.com：规则 #1904 DOMAIN-SUFFIX,chatgpt.com → GPT（功能已验证）
-  afc-route-probe.chatgpt.com：规则 #1904 DOMAIN-SUFFIX,chatgpt.com → GPT（功能已验证）
-GPT：保持 [Normal x0.5] 日本 03（可用）
-```
+| 命令 | 作用 |
+|---|---|
+| `afc fix '<域名>'` / `--force` / `--dry-run` | 解析路由并修复 / 强制轮换 / 只看不切 |
+| `afc schedule add`·`list`·`remove` | 管理定时修复的域名范围 |
+| `afc schedule install`·`uninstall`·`status` | 安装 / 卸载 / 查看定时任务 |
+| `afc groups` / `afc doctor` | 看当前订阅的组 / 逐节点体检（按组，不接受域名参数） |
 
-需要主动轮换时，`--force` 会排除当前节点，只切换到另一个同时通过全部判据的节点；没有替代节点时原选择保持不变：
+任何命令加 `--help` 看详细用法。旧版按组模式（`afc add`、`afc fix --group/--all`）仍然保留。
 
-```bash
-afc fix '*.chatgpt.com' --force
-```
+## 行为边界
 
-## 定时域名管理
+- 不碰 `DIRECT`/`REJECT` 等内建策略，也不强行钉住 URLTest、Fallback、LoadBalance 等自动组；
+  落到 `MATCH`（兜底规则）的路径同样会修复
+- 路由判定**不猜**：能证明的才确认 —— 从当前运行配置补回 `no-resolve`，用 mihomo 自己的 DNS 逐个地址
+  验证 `IP-CIDR`/`IP-CIDR6`；`RULE-SET`、`GEOSITE`、GEOIP/ASN、进程或入站条件等证明不了的规则会报
+  「不完整」并返回退出码 3，绝不猜一个组去切换
+- 其它域名默认按 HTTPS 200–399 判定，只代表“可达”，不代表登录或全部业务功能可用
 
-```bash
-afc schedule add '*.chatgpt.com'
-afc schedule list
-afc schedule remove '*.chatgpt.com'
-afc schedule install
-```
+**退出码**：`0` 成功　`2` 未找到可用节点　`3` 结果不完整或环境故障　`64` 用法错误
 
-首次 `schedule add` 会把内置 `*.chatgpt.com` 默认值一并写入配置。`domains: []` 表示明确禁用全部定时域名；
-未写 `domains` 才会使用内置默认值。自定义站点若不能用通用 HTTPS 状态码判断，可给 `schedule add` 同时传
-`--url` 与 `--expect`，详见 `afc schedule --help`。
+## 配置
 
-## 旧版按组控制（显式模式）
+可选，字段与默认值见 [`afc.config.yaml`](afc.config.yaml)。查找顺序：`--config` → `./afc.config.yaml` → `~/.config/afc/config.yaml`；`domains: []` 表示禁用全部定时域名。
 
-域名模式是默认行为；需要固定处理某个组时，旧命令仍然保留：
+## 要求与排查
 
-```bash
-afc groups                # 列出代理组（第一列是编号）
-afc add 3                 # 把第 3 个组写入 legacy targets 配置
-afc fix --group GPT       # 只处理指定组（也可写编号，如 --group 3）
-afc fix --group GPT --force
-afc fix --all             # 旧版按组自动发现模式
-afc fix --dry-run         # 只看会怎么切，不做改动
-afc fix --no-auto         # 只处理配置里声明过的组
-afc doctor --json         # 机器可读，可直接喂给 jq
-afc groups --verbose      # 逐组说明为什么管/不管，以及它认到的控制器
-afc -v                    # 版本号
-```
+Node.js ≥ 20（macOS / Linux / Windows）。探测节点需要一个 mihomo 可执行文件——afc 不下载、不内置内核，
+通常能自动找到你客户端旁边的那个。
 
-## 不是 Clash Party / 有多个订阅
+认不到控制端点、Windows 命名管道、WSL、找不到内核、定时任务异常、结果报「不完整」等，见
+[`docs/troubleshooting.md`](docs/troubleshooting.md)。
 
-- **其他客户端**（Clash Verge 等）：afc 会自动去找内核的控制端点和运行时配置，通常直接就能用。
-  它按这个顺序找：运行时配置里的 `external-controller` / `external-controller-pipe` →
-  内核进程命令行里的 `-ext-ctl*` → 内核进程实际监听的端口 → 命名管道（枚举 + 按当前用户 SID 推导 Verge 的管道名）→ 常见套接字/管道名 → 默认端口 9090、9097。
+## License
 
-  认不到时先跑 `afc groups --verbose`，它会打印「afc 到底找了哪些地方、每个候选源自哪里」；
-  也可以手动指定：
-
-```bash
-afc groups --controller unix:/tmp/mihomo-party-<uid>-<pid>.sock   # Linux / macOS 的套接字
-afc groups --controller 'pipe:\\.\pipe\MihomoParty\mihomo'        # Clash Party 的命名管道
-afc groups --controller 'pipe:\\.\pipe\verge-mihomo'              # Clash Verge 旧版的命名管道
-afc groups --controller 127.0.0.1:9097 --secret <密钥>            # 开了 external-controller 时（Verge 默认 9097）
-```
-
-  Windows 上还有两个容易踩的点：
-
-  - **「代理端口」和「控制端口」是两回事**（最常见的误判）。混合/HTTP/SOCKS 代理端口是给浏览器与
-    系统代理用的，改成什么都与 afc 无关；afc 要的是客户端设置里单独那一项：
-    Clash Verge Rev 在「设置 → Clash 设置 → 外部控制」（默认 `127.0.0.1:9097`），
-    Clash Party 在「内核设置 → 外部控制地址 / 外部控制访问密钥」。
-    如果把代理端口改成了 afc 会去试的端口（比如 9090），afc 收到的就是代理端口对 `/version`
-    回的 `400 Bad Request`，表现为「找到了候选但都无法访问」——1.1.2 起这种应答会被直接点名。
-  - **Clash Verge Rev 新版默认不开 TCP 端口**，控制端点挂在命名管道
-    `\\.\pipe\verge-mihomo-sidecar-<release|dev>-<当前用户 SID 的 sha256>` 上（名字和随机
-    `secret` 都写在 `%APPDATA%\io.github.clash-verge-rev.clash-verge-rev\config.yaml` 里）。
-    afc 会读那份配置，也会自己按你的 SID 算出管道名，一般不用手动指定。
-  - **Clash Party 的管道是「子目录」形式** `\\.\pipe\MihomoParty\mihomo`，不是 `\\.\pipe\mihomo-party`；
-    内核还可能以服务身份（SYSTEM）运行，此时读不到命令行，afc 会改用镜像名 + 内核实际监听的端口来找。
-
-- **改过控制端口**：把它写进 `afc.config.yaml`，定时任务也会用上（定时任务不带任何端点参数）：
-
-```yaml
-controller:
-  endpoint: 127.0.0.1:9191        # 也可写 unix:/path.sock 或 pipe:\\.\pipe\MihomoParty\mihomo
-  secret: your-secret             # 省略时从客户端自己的运行时配置里读
-  ports: [9191]                   # 只写了端口：自动发现时额外试这些端口
-```
-
-  优先级：`--controller` / `--secret`（命令行）> `controller.*`（配置文件）> 自动发现。
-
-- **多个订阅**：afc 跟着**当前生效的订阅**走 —— 切订阅是客户端的事，不用在 afc 里切。
-  两个订阅的组名不一样也能自动认（例如一个叫 `GPT`、另一个叫 `🤖AI网站`）。
-
-## 常见问题
-
-**Clash 里的 GPT 分组老是断开，能不能自动换节点？**
-可以。登记 `*.chatgpt.com` 后，afc 每次都按当前规则重新找它实际经过的组；连不上才扫描候选，
-能连就保持你的选择。`DIRECT`/`REJECT`、自动组会跳过，无法展开的不透明规则会明确报告为不完整。
-
-**为什么以前会在 `IPCIDR` 规则处提示“无法完整解析”？**
-旧版控制 API 的 `/rules` 不返回 `no-resolve` 修饰符，afc 只看到 IP 规则时会保守停止。现在 afc 会从
-mihomo 当前运行配置补回该修饰符：域名阶段能确定跳过的私网规则会继续往后匹配；确实需要目标 IP 的规则，
-则使用控制器 `/dns/query` 的 A/AAAA 结果（而不是可能不同的系统 DNS）。只要不同地址得到不同策略，仍会退出码 3，绝不猜一个组去切换。
-手动 `afc fix` 和定时任务共用这套解析逻辑。
-
-**从 1.2.x 升级后为什么要重跑 `afc schedule install`？**
-1.3.0 把计划任务从旧的 `fix --all --quiet` 改为域名驱动的 `fix --scheduled --quiet`。
-仅升级 npm 包不会自动改系统任务；先用 `afc schedule list` 核对域名，再重跑一次 `afc schedule install` 覆盖旧定义。
-
-**系统提示「App 后台活动」显示为 Node.js Foundation？（仅 macOS）**
-正常，那就是本项目的定时任务（它执行的是 `node`，macOS 按代码签名主体归类）。
-查看或关闭：系统设置 → 通用 → 登录项与扩展；`afc schedule status --verbose` 可核对任务文件路径。
-
-**在 WSL（bash）里跑 afc？**
-请改用 Windows 的 PowerShell / cmd —— 在**跑 Clash 的那台机器上**运行：
-
-```powershell
-npm i -g auto-fix-clash
-afc groups
-```
-
-WSL 与 Windows 不在同一个网络命名空间（WSL2 的 `127.0.0.1` 是它自己的回环，命名管道也跨不过去），
-而且 afc 探测节点还要用 Windows 上的 mihomo 内核二进制。要在 WSL 里用需要额外配网络，afc 不做自动适配；
-真需要的话用 `controller.endpoint` 指向宿主机 IP、并给 `probe.kernelPath` 准备一个 Linux 版 mihomo。
-
-**`afc doctor` / `afc fix` 说找不到 mihomo 内核二进制？**
-这两条命令要起临时内核实例，逐个节点发真实请求，所以需要一个 mihomo 可执行文件（afc 不下载、不内置内核）。
-afc 会按顺序找：正在运行的内核进程 → **客户端主程序旁边的内核**（Clash Verge 的 `verge-mihomo.exe` /
-`verge-mihomo-alpha.exe`，Clash Party 的 `resources\sidecar\mihomo.exe`，所以装在哪个目录都行）
-→ 常见安装位置 → 客户端目录扫描 → `PATH`。都不行就显式指定：
-
-```yaml
-probe:
-  kernelPath: D:\tools\Clash Verge\verge-mihomo.exe
-```
-
-**Windows 上每 5 分钟弹一个黑窗口？**
-1.2.3 起不会了：任务不再是直接跑控制台程序 `node.exe`，而是跑 `wscript.exe` + 由 afc 生成的
-`%LOCALAPPDATA%\afc\logs\run-hidden.vbs`，把窗口状态设为隐藏（启动器还会把 afc 的退出码回传给任务计划程序）。
-从旧版本升级后请重跑一次 `afc schedule install` 改写已有任务；若本机 `wscript` 被安全策略禁用，
-安装时会明确告诉你任务会有窗口闪现。
-
-**`afc schedule status` 说没安装，但我装过了？**
-1.2.2 起会给出**核验过**的状态：`install` 创建任务后会立刻回查一次，`status` 走的是 PowerShell 的
-`Get-ScheduledTask`（结构化字段，与系统语言无关）。此前版本在中文等本地化 Windows 上会把
-`schtasks` 的 GBK 输出按 UTF-8 读、按英文标签匹配，于是永远报告"未安装"。仍显示未安装时加 `--verbose`
-看任务名与后端，或手动 `schtasks /Query /TN auto-fix-clash-heal`。
-
-**会改我的 Clash 配置吗？**
-不会。afc 只写这几处：系统调度器的任务定义（macOS 的 `~/Library/LaunchAgents/`、
-Linux 的 `~/.config/systemd/user/` 或 crontab、Windows 的任务计划程序数据库）、
-日志目录（macOS `~/Library/Logs/afc`、Linux `~/.local/state/afc`、Windows `%LOCALAPPDATA%\afc\logs`），
-以及你自己用 `afc add` 指定的那份 afc 配置文件。卸载时任务与日志一起删除。
-
-**日志里的运行间隔不均匀（比如 05:33 → 06:15）？**
-正常。电脑睡眠期间不触发：systemd 那边靠 `Persistent=true`、launchd 由系统自己补跑，
-Windows 上错过的那一次不补，但下一个周期照常（间隔 5 分钟，最多晚几分钟）。
-
-**退出码**：`0` 成功　`2` 未找到可用节点　`3` 环境故障　`64` 用法错误
-
----
-
-## English
-
-**afc** (auto-fix-clash) keeps the proxy group that actually carries your traffic pinned to a node that really works.
-
-You give it a stable **domain scope** instead of a group name; afc resolves that scope against the live
-mihomo rule list every run, so it keeps working when a subscription renames or reshuffles groups.
-
-It does not trust latency or node names. It sends a real request to the target site
-(for example `chatgpt.com/backend-api/codex/responses`) and reads the response: `405` means the
-node is usable, `403` means its exit is country-blocked. When the currently selected node fails,
-afc probes the group's candidates and switches to the first one that really works; while the
-current node is healthy it changes nothing (`--force` rotates anyway).
-
-```bash
-npm i -g auto-fix-clash                  # Node.js >= 20
-afc fix '*.chatgpt.com'                  # find and repair every group this scope routes through
-afc schedule add '*.example.com'         # register more scopes for the timer
-afc schedule install                     # check every 5 minutes
-```
-
-- Cross-platform: macOS (launchd), Linux (systemd user timer, cron fallback), Windows (Task Scheduler)
-- Works with Clash Party, Clash Verge / Verge Rev, ClashX Meta or any mihomo kernel —
-  Unix socket, Windows named pipe (`\\.\pipe\MihomoParty\mihomo`,
-  `\\.\pipe\verge-mihomo-sidecar-*-<hash>`) or external-controller with a secret
-- `*.example.com` is apex-inclusive; every generated witness host is evaluated independently
-- Route evaluation is conservative and never guesses: it recovers `no-resolve` modifiers from the
-  running config and uses mihomo's own controller DNS for plain `IP-CIDR`/`IP-CIDR6` (all A/AAAA
-  answers must agree). Opaque rules such as `RULE-SET`, `GEOSITE`, `GEOIP`/`IP-ASN`, process or
-  inbound conditions stop the resolution instead — afc then repairs what it could confirm, reports
-  the rest as incomplete and exits with code `3` rather than switching on a guess
-- Never rewrites your Clash config: it only switches the selected node through the control API
-- Exit codes: `0` success, `2` no usable node, `3` incomplete/environment failure, `64` usage error
-
-Keywords: clash, mihomo, clash-meta, clash-verge, clash-party, proxy group auto switch,
-node health check, self-healing proxy, latency vs real reachability, ChatGPT / Codex connectivity,
-launchd, systemd, Windows Task Scheduler, cross-platform CLI.
+MIT — 见 [LICENSE](LICENSE)。
