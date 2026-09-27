@@ -1,7 +1,8 @@
 # afc — 让 Clash 代理组自动选中「真正能用」的节点
 
-> Clash / mihomo（Clash Meta）代理组自动测速与自愈工具：直连 ChatGPT、Codex 等目标站点判定节点真实可用性，当前节点挂了自动切换，
-> 一条命令装好定时巡检。支持 macOS / Linux / Windows，兼容 Clash Party、Clash Verge（Rev）、ClashX Meta 与任意 mihomo 内核。
+> Clash / mihomo（Clash Meta）代理组自动测速与自愈工具：给它一个稳定的**域名范围**（如 `*.chatgpt.com`），
+> 它按当前 mihomo 规则找出实际承载流量的代理组，直连 ChatGPT、Codex 等目标站点判定节点真实可用性，
+> 当前节点挂了自动切换，一条命令装好定时巡检。支持 macOS / Linux / Windows，兼容 Clash Party、Clash Verge（Rev）、ClashX Meta 与任意 mihomo 内核。
 
 ## 你是否也遇到过这些情况？
 
@@ -25,9 +26,11 @@ afc schedule install      # 每 5 分钟按已登记域名重新解析路由并�
 
 ```bash
 $ afc schedule status
-周期性修复任务：运行中，每 300 秒
-  最近一次：2026-09-18 13:50:55 GPT：保持 [Normal x0.5] 日本 03（可用）
-  卸载：afc schedule uninstall　（--verbose 查看路径与显示名）
+周期性修复任务：运行中，后端 launchd，每 300 秒
+  最近一次：2026-09-27 21:28:13 GPT：保持 [Normal x0.5] 日本 03（可用）
+  配置：/Users/you/.config/afc/config.yaml
+  域名范围：*.chatgpt.com
+  卸载：afc schedule uninstall　（--verbose 查看定义文件与日志路径）
 ```
 
 不想用了，一条命令撤掉：
@@ -79,7 +82,7 @@ afc schedule install --dry-run      # 先看将要写入的任务定义
 | `afc schedule status` | 看它是否在跑、最近做了什么 |
 | `afc schedule uninstall` | 卸载 |
 | `afc groups` | 当前订阅有哪些组、哪些会被照顾 |
-| `afc doctor` | 体检并打印判定表 |
+| `afc doctor` | 逐节点体检并打印判定表（**按组**，不接受域名参数；域名请用 `afc fix <域名> --dry-run`） |
 | `afc fix '*.chatgpt.com'` | 解析该域名范围并立刻修复所有确认组 |
 | `afc fix '*.chatgpt.com' --force` | 即使当前节点可用，也换到另一个实测可用节点 |
 
@@ -109,14 +112,24 @@ GPT　当前：[Normal x0.5] 日本 03　候选 38 个
 
 ```bash
 $ afc fix '*.chatgpt.com'
-*.chatgpt.com → GPT（DOMAIN-SUFFIX chatgpt.com）：已切换 日本 02 → 日本 03
+*.chatgpt.com → GPT
+  chatgpt.com：规则 #1904 DOMAIN-SUFFIX,chatgpt.com → GPT（功能已验证）
+  afc-route-probe.chatgpt.com：规则 #1904 DOMAIN-SUFFIX,chatgpt.com → GPT（功能已验证）
+GPT：已切换 [Normal x0.5] 日本 02 → [Normal x0.5] 日本 03
 ```
+
+`规则 #N` 是人看的**一基编号**（`--verbose` 会另附 `(API index N-1)` 供对照控制 API）；
+`afc-route-probe.chatgpt.com` 是 afc 为通配范围生成的代表性子域 —— 每个见证域名都独立把当前规则走一遍，
+最后的「已切换 / 保持」才是对组的实际操作。
 
 当前节点还好时什么都不做，只探测这一个节点（约 2 秒）：
 
 ```bash
 $ afc fix '*.chatgpt.com'
-*.chatgpt.com → GPT：保持 日本 03（服务功能已验证）
+*.chatgpt.com → GPT
+  chatgpt.com：规则 #1904 DOMAIN-SUFFIX,chatgpt.com → GPT（功能已验证）
+  afc-route-probe.chatgpt.com：规则 #1904 DOMAIN-SUFFIX,chatgpt.com → GPT（功能已验证）
+GPT：保持 [Normal x0.5] 日本 03（可用）
 ```
 
 需要主动轮换时，`--force` 会排除当前节点，只切换到另一个同时通过全部判据的节点；没有替代节点时原选择保持不变：
@@ -271,20 +284,36 @@ Windows 上错过的那一次不补，但下一个周期照常（间隔 5 分钟
 
 ## English
 
-**afc** (auto-fix-clash) keeps a Clash / mihomo proxy group pinned to a node that actually works.
+**afc** (auto-fix-clash) keeps the proxy group that actually carries your traffic pinned to a node that really works.
+
+You give it a stable **domain scope** instead of a group name; afc resolves that scope against the live
+mihomo rule list every run, so it keeps working when a subscription renames or reshuffles groups.
 
 It does not trust latency or node names. It sends a real request to the target site
 (for example `chatgpt.com/backend-api/codex/responses`) and reads the response: `405` means the
 node is usable, `403` means its exit is country-blocked. When the currently selected node fails,
 afc probes the group's candidates and switches to the first one that really works; while the
-current node is healthy it changes nothing.
+current node is healthy it changes nothing (`--force` rotates anyway).
+
+```bash
+npm i -g auto-fix-clash                  # Node.js >= 20
+afc fix '*.chatgpt.com'                  # find and repair every group this scope routes through
+afc schedule add '*.example.com'         # register more scopes for the timer
+afc schedule install                     # check every 5 minutes
+```
 
 - Cross-platform: macOS (launchd), Linux (systemd user timer, cron fallback), Windows (Task Scheduler)
 - Works with Clash Party, Clash Verge / Verge Rev, ClashX Meta or any mihomo kernel —
   Unix socket, Windows named pipe (`\\.\pipe\MihomoParty\mihomo`,
   `\\.\pipe\verge-mihomo-sidecar-*-<hash>`) or external-controller with a secret
+- `*.example.com` is apex-inclusive; every generated witness host is evaluated independently
+- Route evaluation is conservative and never guesses: it recovers `no-resolve` modifiers from the
+  running config and uses mihomo's own controller DNS for plain `IP-CIDR`/`IP-CIDR6` (all A/AAAA
+  answers must agree). Opaque rules such as `RULE-SET`, `GEOSITE`, `GEOIP`/`IP-ASN`, process or
+  inbound conditions stop the resolution instead — afc then repairs what it could confirm, reports
+  the rest as incomplete and exits with code `3` rather than switching on a guess
 - Never rewrites your Clash config: it only switches the selected node through the control API
-- Install: `npm i -g auto-fix-clash && afc schedule install` (Node.js ≥ 20)
+- Exit codes: `0` success, `2` no usable node, `3` incomplete/environment failure, `64` usage error
 
 Keywords: clash, mihomo, clash-meta, clash-verge, clash-party, proxy group auto switch,
 node health check, self-healing proxy, latency vs real reachability, ChatGPT / Codex connectivity,
