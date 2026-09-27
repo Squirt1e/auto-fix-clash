@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { main } from '../src/cli/index.ts';
 import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK, EXIT_USAGE } from '../src/exit-codes.ts';
-import { resolveFixRequest } from '../src/cli/commands/fix.ts';
+import { formatRouteIssue, resolveFixRequest } from '../src/cli/commands/fix.ts';
 import { DEFAULT_DOMAIN_TARGETS } from '../src/targets/domain.ts';
 
 /** 捕获 main() 写到 stdout/stderr 的内容。 */
@@ -176,6 +176,23 @@ test('计划任务模式拒绝 --force', async () => {
   const result = await capture(['fix', '--scheduled', '--force']);
   assert.equal(result.code, EXIT_USAGE);
   assert.match(result.err, /计划任务.*--force/);
+});
+
+test('路由问题使用一基编号，quiet 计划任务输出保持为单行', () => {
+  const issue = {
+    pattern: '*.chatgpt.com',
+    witness: 'chatgpt.com',
+    kind: 'unresolved-rule',
+    ruleIndex: 7,
+    reason: '规则 #8 RULE-SET 无法可靠判定',
+  };
+  const quiet = formatRouteIssue(issue, { quiet: true, verbose: false, now: new Date('2026-09-27T08:00:00Z') });
+  assert.match(quiet, /^2026-09-27 \d{2}:00:00 chatgpt\.com：规则 #8/);
+  assert.equal(quiet.trimEnd().split('\n').length, 1);
+  assert.doesNotMatch(quiet, /无法完整解析的路由/);
+
+  const verbose = formatRouteIssue(issue, { quiet: false, verbose: true });
+  assert.match(verbose, /规则 #8.*\(API index 7\)/);
 });
 
 test('fix 帮助说明通配符包含裸域、通用可达性和 force', async () => {

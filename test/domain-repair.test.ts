@@ -222,6 +222,6 @@ test('路由输出包含域名、规则依据、代理组和判据可信度', as
   });
   const text = formatRouteBinding(report.bindings[0]!, [target]);
   assert.match(text, /example\.com → DEFAULT/);
-  assert.match(text, /规则 #0 MATCH/);
+  assert.match(text, /规则 #1 MATCH/);
   assert.match(text, /只能证明 HTTPS 可达/);
 });

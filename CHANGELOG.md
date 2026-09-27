@@ -7,7 +7,9 @@
 - 新增 `--force`，可在当前节点健康时主动切换到另一个通过全部适用判据的节点；没有可用替代时保持原选择。
 - 新增 `domains` 配置和 `afc schedule add/list/remove`。定时任务改跑 `fix --scheduled --quiet`，每次重新解析实时路由，
   不再以可能变化的代理组名作为默认范围；旧 `targets` 与显式 `--group` 模式继续兼容。
-- 对 `RULE-SET`、`GEOSITE`、进程/IP 条件等无法可靠展开的不透明规则不再猜测：先修复独立确认的组，
+- 路由解析会从当前运行配置补回 `/rules` 缺失的 `no-resolve` 修饰符，因此私网 IP 规则不再无条件遮住后面的域名规则；
+  普通 `IP-CIDR`/`IP-CIDR6` 使用 mihomo 控制器 DNS 的 A/AAAA 结果，所有地址路由一致才算确认。
+- 对 `RULE-SET`、`GEOSITE`、GEOIP/ASN、进程或入站条件等仍无法可靠展开的不透明规则不猜测：先修复独立确认的组，
   再报告未解析范围并以退出码 3 表示结果不完整。`DIRECT`/`REJECT` 与自动选择类组只报告跳过。
 - **升级后请重跑 `afc schedule install`**，用新的域名驱动参数覆盖系统里已有的 `fix --all --quiet` 任务定义。
 

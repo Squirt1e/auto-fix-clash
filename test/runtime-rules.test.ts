@@ -57,6 +57,18 @@ test('只给索引和规范化签名完全对齐的实时规则补充修饰符',
   assert.equal(mismatched[0]?.noResolve, undefined);
 });
 
+test('mihomo 把 IP-CIDR6 回报为 IPCIDR 时仍能对齐 no-resolve', () => {
+  const metadata = parseRuntimeRuleMetadata([
+    'IP-CIDR6,::1/128,DIRECT,no-resolve',
+  ]);
+
+  const enriched = enrichLiveRules([
+    live(0, 'IPCIDR', '::1/128', 'DIRECT'),
+  ], metadata);
+
+  assert.equal(enriched[0]?.noResolve, true);
+});
+
 test('从显式运行时配置读取规则快照', () => {
   const dir = mkdtempSync(join(tmpdir(), 'afc-runtime-rules-'));
   const path = join(dir, 'config.yaml');

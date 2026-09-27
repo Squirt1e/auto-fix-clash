@@ -26,6 +26,7 @@ export interface DomainRepairIssue {
   group?: string;
   kind: string;
   reason: string;
+  ruleIndex?: number;
 }
 
 export interface DomainRepairReport {

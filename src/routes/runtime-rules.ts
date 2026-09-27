@@ -17,7 +17,9 @@ export interface RuntimeRulesSnapshot {
 const TRAILING_MODIFIERS = new Set(['no-resolve', 'src']);
 
 function compactRuleType(type: string): string {
-  return type.trim().replace(/[-_]/g, '').toUpperCase();
+  const compact = type.trim().replace(/[-_]/g, '').toUpperCase();
+  // mihomo 的 /rules 把 IPv4/IPv6 CIDR 统一回报为 IPCIDR。
+  return compact === 'IPCIDR6' ? 'IPCIDR' : compact;
 }
 
 function normalizedPayload(payload: string): string {

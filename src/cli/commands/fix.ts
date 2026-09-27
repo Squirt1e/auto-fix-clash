@@ -1,6 +1,6 @@
 import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK, EXIT_USAGE } from '../../exit-codes.ts';
 import { UsageError } from '../../errors.ts';
-import { policyForDomain, repairDomains } from '../../heal/domain-repair.ts';
+import { policyForDomain, repairDomains, type DomainRepairIssue } from '../../heal/domain-repair.ts';
 import { GroupNotSwitchableError, repairTarget, type RepairOutcome } from '../../heal/repair.ts';
 import { parseDomainPattern, type DomainTargetConfig } from '../../targets/domain.ts';
 import type { ResolvedBinding } from '../../routes/resolver.ts';
@@ -44,7 +44,7 @@ export function formatRouteBinding(binding: ResolvedBinding, targets: DomainTarg
     const policy = target ? policyForDomain(target, evidence.witness) : undefined;
     const confidence = policy?.confidence === 'service' ? '功能已验证' : '只能证明 HTTPS 可达';
     lines.push(
-      `  ${evidence.witness}：规则 #${evidence.rule.index} ` +
+      `  ${evidence.witness}：规则 #${evidence.rule.index + 1} ` +
       `${evidence.rule.type}${evidence.rule.payload ? `,${evidence.rule.payload}` : ''} → ` +
       `${evidence.policy}（${confidence}）`,
     );
@@ -52,11 +52,23 @@ export function formatRouteBinding(binding: ResolvedBinding, targets: DomainTarg
   return lines.join('\n') + '\n';
 }
 
-function timestamp(): string {
-  const now = new Date();
+function timestamp(now = new Date()): string {
   const pad = (n: number): string => String(n).padStart(2, '0');
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
     `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+}
+
+export function formatRouteIssue(
+  issue: DomainRepairIssue,
+  options: { quiet: boolean; verbose: boolean; now?: Date },
+): string {
+  const subject = issue.group ?? issue.witness ?? issue.pattern ?? '目标';
+  const apiIndex = options.verbose && issue.ruleIndex !== undefined
+    ? ` (API index ${issue.ruleIndex})`
+    : '';
+  return options.quiet
+    ? `${timestamp(options.now)} ${subject}：${issue.reason}${apiIndex}\n`
+    : `  ${subject}：${issue.reason}${apiIndex}\n`;
 }
 
 export function summarize(outcome: RepairOutcome, dryRun: boolean): string {
@@ -214,12 +226,7 @@ export async function run(context: CommandContext): Promise<number> {
       if (section.issues.length === 0) continue;
       if (!quiet) process.stderr.write(`${section.heading}：\n`);
       for (const issue of section.issues) {
-        const subject = issue.group ?? issue.witness ?? issue.pattern ?? '目标';
-        process.stderr.write(
-          quiet
-            ? `${timestamp()} ${subject}：${issue.reason}\n`
-            : `  ${subject}：${issue.reason}\n`,
-        );
+        process.stderr.write(formatRouteIssue(issue, { quiet, verbose }));
       }
     }
   }
