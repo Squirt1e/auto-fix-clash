@@ -760,6 +760,7 @@ export interface RuntimeConfigSummary {
   proxies: unknown[];
   proxyGroups: unknown[];
   proxyProviders: Record<string, unknown>;
+  rules: unknown[];
 }
 
 export function readRuntimeConfig(path: string): RuntimeConfigSummary {
@@ -779,6 +780,7 @@ export function readRuntimeConfig(path: string): RuntimeConfigSummary {
     proxies: Array.isArray(doc['proxies']) ? doc['proxies'] : [],
     proxyGroups: Array.isArray(doc['proxy-groups']) ? doc['proxy-groups'] : [],
     proxyProviders: obj(doc['proxy-providers']),
+    rules: Array.isArray(doc['rules']) ? doc['rules'] : [],
   };
 }
 

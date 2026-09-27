@@ -27,6 +27,8 @@ export interface MihomoRule {
   payload: string;
   proxy: string;
   size: number;
+  /** 仅运行时 YAML 与 /rules 签名对齐后存在；undefined 表示无法证明修饰符状态。 */
+  noResolve?: boolean;
   extra?: {
     disabled?: boolean;
     hitCount?: number;

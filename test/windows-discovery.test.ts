@@ -221,13 +221,15 @@ test('readRuntimeConfig 读出 Clash Verge 写进配置的管道名与 secret', 
   const { dir, path } = tempConfig(
     'external-controller: 127.0.0.1:9097\n' +
     'external-controller-pipe: \\\\.\\pipe\\verge-mihomo-sidecar-release-deadbeef\n' +
-    'secret: s3cr3t\n',
+    'secret: s3cr3t\n' +
+    'rules:\n  - IP-CIDR,0.0.0.0/8,DIRECT,no-resolve\n',
   );
   try {
     const summary = readRuntimeConfig(path);
     assert.equal(summary.externalController, '127.0.0.1:9097');
     assert.equal(summary.externalControllerPipe, '\\\\.\\pipe\\verge-mihomo-sidecar-release-deadbeef');
     assert.equal(summary.secret, 's3cr3t');
+    assert.deepEqual(summary.rules, ['IP-CIDR,0.0.0.0/8,DIRECT,no-resolve']);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
