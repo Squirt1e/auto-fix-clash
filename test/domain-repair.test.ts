@@ -73,6 +73,25 @@ test('不透明规则造成退出码 3，但不隐藏此前已确认组的成功
   assert.equal(report.issues[0]?.kind, 'unresolved-rule');
 });
 
+test('协调器用运行时 no-resolve 证据越过私网规则并修复域名组', async () => {
+  const report = await repairDomains({
+    config: loadConfig(),
+    targets: [domain('chatgpt.com')],
+    client: fakeClient([
+      rule(7, 'IPCIDR', '0.0.0.0/8', 'DIRECT'),
+      rule(1903, 'DomainSuffix', 'chatgpt.com', 'GPT'),
+    ]),
+    runtimeRules: [
+      { index: 7, type: 'IP-CIDR', payload: '0.0.0.0/8', proxy: 'DIRECT', noResolve: true },
+      { index: 1903, type: 'DOMAIN-SUFFIX', payload: 'chatgpt.com', proxy: 'GPT', noResolve: false },
+    ],
+    repairer: async (options) => kept(options.groupName),
+  });
+  assert.equal(report.exitCode, EXIT_OK);
+  assert.deepEqual(report.outcomes.map((outcome) => outcome.group), ['GPT']);
+  assert.deepEqual(report.issues, []);
+});
+
 test('任一组没有替代节点时聚合为退出码 2', async () => {
   const report = await repairDomains({
     config: loadConfig(), targets: [domain('example.com')],

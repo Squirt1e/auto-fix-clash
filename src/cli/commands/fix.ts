@@ -4,6 +4,7 @@ import { policyForDomain, repairDomains } from '../../heal/domain-repair.ts';
 import { GroupNotSwitchableError, repairTarget, type RepairOutcome } from '../../heal/repair.ts';
 import { parseDomainPattern, type DomainTargetConfig } from '../../targets/domain.ts';
 import type { ResolvedBinding } from '../../routes/resolver.ts';
+import { loadRuntimeRuleMetadata } from '../../routes/runtime-rules.ts';
 import { interactive } from '../format.ts';
 import { isQuiet, openRuntime, planTargets } from '../runtime.ts';
 import { optBoolean, type CommandContext } from '../context.ts';
@@ -180,12 +181,14 @@ export async function run(context: CommandContext): Promise<number> {
     return EXIT_OK;
   }
 
+  const runtimeRules = loadRuntimeRuleMetadata(runtime.config.probe.runtimeConfigPath);
   const report = await repairDomains({
     config: runtime.config,
     targets: request.targets,
     client: runtime.controller.client,
     force: request.force,
     dryRun,
+    ...(runtimeRules ? { runtimeRules: runtimeRules.rules } : {}),
     onNotice: (message) => {
       if (!quiet && interactive()) process.stderr.write(`  ${message}\n`);
     },

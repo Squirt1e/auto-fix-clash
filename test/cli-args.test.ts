@@ -157,6 +157,14 @@ test('没有位置参数和旧组选项时读取已配置域名', () => {
   assert.deepEqual(request.targets, DEFAULT_DOMAIN_TARGETS);
 });
 
+test('计划任务模式读取同一份已配置域名', () => {
+  const request = resolveFixRequest({ positionals: [], values: { scheduled: true } }, DEFAULT_DOMAIN_TARGETS);
+  assert.equal(request.mode, 'domain');
+  if (request.mode !== 'domain') return;
+  assert.equal(request.scheduled, true);
+  assert.deepEqual(request.targets, DEFAULT_DOMAIN_TARGETS);
+});
+
 test('显式组选项保留旧模式，域名不能和 --group 混用', async () => {
   assert.equal(resolveFixRequest({ positionals: [], values: { group: 'GPT', force: true } }, []).mode, 'legacy');
   const result = await capture(['fix', 'example.com', '--group', 'GPT']);

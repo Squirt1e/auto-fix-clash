@@ -18,8 +18,8 @@ function proxies(extra: Record<string, ProxyInfo> = {}): Record<string, ProxyInf
   };
 }
 
-test('通配范围按规则顺序确认精确、后缀和 MATCH 的所有不同组', () => {
-  const result = resolveDomainRoutes(
+test('通配范围按规则顺序确认精确、后缀和 MATCH 的所有不同组', async () => {
+  const result = await resolveDomainRoutes(
     [parseDomainPattern('*.example.com')],
     [
       rule(0, 'DOMAIN', 'api.example.com', 'API'),
@@ -34,8 +34,8 @@ test('通配范围按规则顺序确认精确、后缀和 MATCH 的所有不同�
   assert.ok(result.bindings.every((binding) => binding.evidence.length >= 1));
 });
 
-test('接受 mihomo API 的 DomainSuffix 规则名', () => {
-  const result = resolveDomainRoutes(
+test('接受 mihomo API 的 DomainSuffix 规则名', async () => {
+  const result = await resolveDomainRoutes(
     [parseDomainPattern('*.example.com')],
     [rule(0, 'DomainSuffix', 'example.com', 'MEDIA')],
     proxies(),
@@ -45,8 +45,8 @@ test('接受 mihomo API 的 DomainSuffix 规则名', () => {
   assert.equal(result.issues.length, 0);
 });
 
-test('精确规则遮住后缀裸域时仍会为后缀子域和 MATCH 分区建见证', () => {
-  const result = resolveDomainRoutes(
+test('精确规则遮住后缀裸域时仍会为后缀子域和 MATCH 分区建见证', async () => {
+  const result = await resolveDomainRoutes(
     [parseDomainPattern('*.example.com')],
     [
       rule(0, 'DOMAIN', 'media.example.com', 'API'),
@@ -60,8 +60,8 @@ test('精确规则遮住后缀裸域时仍会为后缀子域和 MATCH 分区建�
   assert.equal(result.issues.length, 0);
 });
 
-test('MATCH 见证不会落入更窄的后缀分区', () => {
-  const result = resolveDomainRoutes(
+test('MATCH 见证不会落入更窄的后缀分区', async () => {
+  const result = await resolveDomainRoutes(
     [parseDomainPattern('*.example.com')],
     [
       rule(0, 'DOMAIN', 'example.com', 'API'),
@@ -74,8 +74,8 @@ test('MATCH 见证不会落入更窄的后缀分区', () => {
   assert.deepEqual(result.bindings.map((binding) => binding.group).sort(), ['API', 'DEFAULT', 'MEDIA']);
 });
 
-test('禁用规则不参与路由，较早的精确规则不受较晚不透明规则影响', () => {
-  const result = resolveDomainRoutes(
+test('禁用规则不参与路由，较早的精确规则不受较晚不透明规则影响', async () => {
+  const result = await resolveDomainRoutes(
     [parseDomainPattern('api.example.com')],
     [
       rule(0, 'DOMAIN', 'api.example.com', 'API'),
@@ -89,8 +89,8 @@ test('禁用规则不参与路由，较早的精确规则不受较晚不透明�
   assert.equal(result.issues.length, 0);
 });
 
-test('更早的不透明规则使受影响的见证域名无法确认', () => {
-  const result = resolveDomainRoutes(
+test('更早的不透明规则使受影响的见证域名无法确认', async () => {
+  const result = await resolveDomainRoutes(
     [parseDomainPattern('*.example.com')],
     [
       rule(0, 'RULE-SET', 'private', 'PRIVATE'),
@@ -104,8 +104,8 @@ test('更早的不透明规则使受影响的见证域名无法确认', () => {
   assert.ok(result.issues.every((issue) => issue.kind === 'unresolved-rule'));
 });
 
-test('多个见证域名落到同一最终组时合并且保留全部依据', () => {
-  const result = resolveDomainRoutes(
+test('多个见证域名落到同一最终组时合并且保留全部依据', async () => {
+  const result = await resolveDomainRoutes(
     [parseDomainPattern('*.example.com')],
     [
       rule(0, 'DOMAIN', 'api.example.com', 'API'),
@@ -134,12 +134,12 @@ test('委托链选择最深 Selector，并检测循环', () => {
   assert.equal(resolvePolicy('LOOP_A', cyclic).issue?.kind, 'group-cycle');
 });
 
-test('DIRECT、REJECT 和自动组只报告跳过，不安排修复', () => {
+test('DIRECT、REJECT 和自动组只报告跳过，不安排修复', async () => {
   const graph = proxies({
     AUTO: { name: 'AUTO', type: 'URLTest', now: 'A', all: ['A'] },
   });
   for (const policy of ['DIRECT', 'REJECT', 'AUTO']) {
-    const result = resolveDomainRoutes(
+    const result = await resolveDomainRoutes(
       [parseDomainPattern('example.com')],
       [rule(0, 'DOMAIN', 'example.com', policy)],
       graph,
@@ -150,9 +150,9 @@ test('DIRECT、REJECT 和自动组只报告跳过，不安排修复', () => {
   }
 });
 
-test('非 rule 模式不会假装完成了规则解析', () => {
+test('非 rule 模式不会假装完成了规则解析', async () => {
   for (const mode of ['global', 'direct']) {
-    const result = resolveDomainRoutes(
+    const result = await resolveDomainRoutes(
       [parseDomainPattern('example.com')],
       [rule(0, 'MATCH', '', 'DEFAULT')],
       proxies(),
@@ -161,4 +161,57 @@ test('非 rule 模式不会假装完成了规则解析', () => {
     assert.equal(result.bindings.length, 0);
     assert.equal(result.issues[0]?.kind, 'unsupported-mode');
   }
+});
+
+test('已确认 no-resolve 的 IP 规则不会遮住后续域名规则', async () => {
+  const ipRule = { ...rule(7, 'IPCIDR', '0.0.0.0/8', 'DIRECT'), noResolve: true };
+  const result = await resolveDomainRoutes(
+    [parseDomainPattern('chatgpt.com')],
+    [ipRule, rule(1903, 'DomainSuffix', 'chatgpt.com', 'MEDIA')],
+    proxies(),
+    'rule',
+  );
+  assert.deepEqual(result.bindings.map((binding) => binding.group), ['MEDIA']);
+  assert.deepEqual(result.issues, []);
+});
+
+test('IP 规则缺少运行时修饰符证据时仍保持不确定', async () => {
+  const result = await resolveDomainRoutes(
+    [parseDomainPattern('chatgpt.com')],
+    [rule(7, 'IPCIDR', '0.0.0.0/8', 'DIRECT'), rule(1903, 'DomainSuffix', 'chatgpt.com', 'MEDIA')],
+    proxies(),
+    'rule',
+  );
+  assert.equal(result.bindings.length, 0);
+  assert.equal(result.issues[0]?.ruleIndex, 7);
+  assert.match(result.issues[0]?.reason ?? '', /规则 #8/);
+});
+
+test('关键字、通配符和正则域名规则遵守首次命中顺序', async () => {
+  const cases = [
+    rule(0, 'DomainKeyword', 'chat', 'API'),
+    rule(0, 'DomainWildcard', '*.chatgpt.com', 'API'),
+    rule(0, 'DomainRegex', '^chatgpt\\.com$', 'API'),
+  ];
+  for (const first of cases) {
+    const result = await resolveDomainRoutes(
+      [parseDomainPattern(first.type === 'DomainWildcard' ? 'api.chatgpt.com' : 'chatgpt.com')],
+      [first, rule(1, 'MATCH', '', 'DEFAULT')],
+      proxies(),
+      'rule',
+    );
+    assert.deepEqual(result.bindings.map((binding) => binding.group), ['API'], first.type);
+  }
+});
+
+test('非法域名正则明确报告不确定而不是崩溃或跳过', async () => {
+  const result = await resolveDomainRoutes(
+    [parseDomainPattern('chatgpt.com')],
+    [rule(4, 'DomainRegex', '[', 'API'), rule(5, 'MATCH', '', 'DEFAULT')],
+    proxies(),
+    'rule',
+  );
+  assert.equal(result.bindings.length, 0);
+  assert.equal(result.issues[0]?.ruleIndex, 4);
+  assert.match(result.issues[0]?.reason ?? '', /规则 #5.*正则/);
 });

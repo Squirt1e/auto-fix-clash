@@ -7,6 +7,7 @@ import {
   type ResolvedBinding,
   type RouteIssue,
 } from '../routes/resolver.ts';
+import type { RuntimeRuleMetadata } from '../routes/runtime-rules.ts';
 import {
   DEFAULT_DOMAIN_TARGETS,
   parseDomainPattern,
@@ -42,6 +43,7 @@ export interface RepairDomainsOptions {
   dryRun?: boolean;
   onNotice?: (message: string) => void;
   repairer?: (options: GroupRepairOptions) => Promise<RepairOutcome>;
+  runtimeRules?: readonly RuntimeRuleMetadata[];
 }
 
 function asTarget(
@@ -136,11 +138,12 @@ export async function repairDomains(options: RepairDomainsOptions): Promise<Doma
     options.client.proxies(),
   ]);
   const patterns = options.targets.map((target) => parseDomainPattern(target.pattern));
-  const resolution = resolveDomainRoutes(
+  const resolution = await resolveDomainRoutes(
     patterns,
     rules,
     proxies,
     typeof configs['mode'] === 'string' ? configs['mode'] : '',
+    options.runtimeRules ? { runtimeRules: options.runtimeRules } : {},
   );
   const targetsByPattern = new Map(options.targets.map((target) => [
     parseDomainPattern(target.pattern).input,

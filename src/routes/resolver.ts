@@ -10,6 +10,7 @@ import {
   parseDomainPattern,
   type DomainPattern,
 } from '../targets/domain.ts';
+import { enrichLiveRules, type RuntimeRuleMetadata } from './runtime-rules.ts';
 
 export type RouteIssueKind =
   | 'unsupported-mode'
@@ -24,6 +25,8 @@ export interface RouteIssue {
   witness?: string;
   kind: RouteIssueKind;
   reason: string;
+  /** mihomo /rules 返回的零基索引。 */
+  ruleIndex?: number;
 }
 
 export interface RouteEvidence {
@@ -98,11 +101,21 @@ export function resolvePolicy(policy: string, proxies: Record<string, ProxyInfo>
 
 function normalizedRule(rule: MihomoRule): MihomoRule {
   const compactType = rule.type.trim().replace(/[-_]/g, '').toUpperCase();
-  const type = compactType === 'DOMAINSUFFIX' ? 'DOMAIN-SUFFIX' : compactType;
+  const aliases: Record<string, string> = {
+    DOMAINSUFFIX: 'DOMAIN-SUFFIX',
+    DOMAINKEYWORD: 'DOMAIN-KEYWORD',
+    DOMAINWILDCARD: 'DOMAIN-WILDCARD',
+    DOMAINREGEX: 'DOMAIN-REGEX',
+    IPCIDR: 'IP-CIDR',
+    IPCIDR6: 'IP-CIDR6',
+  };
+  const type = aliases[compactType] ?? compactType;
   return {
     ...rule,
     type,
-    payload: rule.payload.trim().toLowerCase().replace(/\.$/, ''),
+    payload: type === 'DOMAIN-REGEX'
+      ? rule.payload.trim()
+      : rule.payload.trim().toLowerCase().replace(/\.$/, ''),
   };
 }
 
@@ -110,10 +123,11 @@ function suffixMatches(host: string, suffix: string): boolean {
   return host === suffix || host.endsWith(`.${suffix}`);
 }
 
-function ruleMatches(rule: MihomoRule, host: string): boolean {
-  if (rule.type === 'DOMAIN') return host === rule.payload;
-  if (rule.type === 'DOMAIN-SUFFIX') return suffixMatches(host, rule.payload);
-  return rule.type === 'MATCH';
+function wildcardRegex(pattern: string): RegExp {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.');
+  return new RegExp(`^${escaped}$`);
 }
 
 function witnessesFor(pattern: DomainPattern, rules: MihomoRule[]): string[] {
@@ -170,30 +184,72 @@ function witnessesFor(pattern: DomainPattern, rules: MihomoRule[]): string[] {
 
 type RuleEvaluation =
   | { rule: MihomoRule }
-  | { issue: { kind: 'unresolved-rule' | 'no-match'; reason: string } };
+  | { issue: { kind: 'unresolved-rule' | 'no-match'; reason: string; ruleIndex?: number } };
+
+type RuleDecision =
+  | { kind: 'match' }
+  | { kind: 'miss' }
+  | { kind: 'unknown'; reason: string };
+
+function evaluateRule(rule: MihomoRule, host: string, destinationResolved: boolean): RuleDecision {
+  if (rule.type === 'DOMAIN') return { kind: host === rule.payload ? 'match' : 'miss' };
+  if (rule.type === 'DOMAIN-SUFFIX') return { kind: suffixMatches(host, rule.payload) ? 'match' : 'miss' };
+  if (rule.type === 'DOMAIN-KEYWORD') return { kind: host.includes(rule.payload) ? 'match' : 'miss' };
+  if (rule.type === 'DOMAIN-WILDCARD') {
+    try {
+      return { kind: wildcardRegex(rule.payload).test(host) ? 'match' : 'miss' };
+    } catch {
+      return { kind: 'unknown', reason: '域名通配表达式无效' };
+    }
+  }
+  if (rule.type === 'DOMAIN-REGEX') {
+    try {
+      return { kind: new RegExp(rule.payload).test(host) ? 'match' : 'miss' };
+    } catch {
+      return { kind: 'unknown', reason: '域名正则表达式无效' };
+    }
+  }
+  if (rule.type === 'MATCH') return { kind: 'match' };
+  if (rule.type === 'IP-CIDR' || rule.type === 'IP-CIDR6') {
+    if (rule.noResolve === true && !destinationResolved) return { kind: 'miss' };
+    if (rule.noResolve === undefined) {
+      return { kind: 'unknown', reason: '运行时规则缺少 no-resolve 修饰符证据' };
+    }
+    return { kind: 'unknown', reason: '目标 IP 规则需要通过 mihomo DNS 判定' };
+  }
+  return { kind: 'unknown', reason: '无法仅凭域名可靠判定' };
+}
 
 function evaluateRules(host: string, rules: MihomoRule[]): RuleEvaluation {
   for (const rule of rules) {
     if (rule.extra?.disabled) continue;
-    if (rule.type !== 'DOMAIN' && rule.type !== 'DOMAIN-SUFFIX' && rule.type !== 'MATCH') {
+    const decision = evaluateRule(rule, host, false);
+    if (decision.kind === 'unknown') {
       return {
         issue: {
           kind: 'unresolved-rule',
-          reason: `规则 #${rule.index} ${rule.type} 无法仅凭域名可靠判定，后续路由不作猜测`,
+          ruleIndex: rule.index,
+          reason: `规则 #${rule.index + 1} ${rule.type} ${decision.reason}，后续路由不作猜测`,
         },
       };
     }
-    if (ruleMatches(rule, host)) return { rule };
+    if (decision.kind === 'match') return { rule };
   }
   return { issue: { kind: 'no-match', reason: `没有规则匹配 ${host}` } };
 }
 
-export function resolveDomainRoutes(
+export interface RouteResolveOptions {
+  runtimeRules?: readonly RuntimeRuleMetadata[];
+  resolveAddresses?: (host: string) => Promise<readonly string[]>;
+}
+
+export async function resolveDomainRoutes(
   patterns: DomainPattern[],
   rawRules: MihomoRule[],
   proxies: Record<string, ProxyInfo>,
   mode: string,
-): RouteResolution {
+  options: RouteResolveOptions = {},
+): Promise<RouteResolution> {
   const bindingsByGroup = new Map<string, ResolvedBinding>();
   const issues: RouteIssue[] = [];
   const normalizedMode = mode.trim().toLowerCase();
@@ -208,7 +264,9 @@ export function resolveDomainRoutes(
     };
   }
 
-  const rules = rawRules.map(normalizedRule).sort((a, b) => a.index - b.index);
+  const rules = enrichLiveRules(rawRules, options.runtimeRules)
+    .map(normalizedRule)
+    .sort((a, b) => a.index - b.index);
   for (const pattern of patterns) {
     for (const witness of witnessesFor(pattern, rules)) {
       const evaluation = evaluateRules(witness, rules);
