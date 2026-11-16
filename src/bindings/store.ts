@@ -8,7 +8,7 @@ import {
   openSync,
   closeSync,
 } from 'node:fs';
-import { join, dirname, relative, isAbsolute } from 'node:path';
+import { join, dirname, relative, isAbsolute, sep } from 'node:path';
 import { afcConfigDir, currentPlatform } from '../platform.ts';
 import { parseDomainPattern } from '../targets/domain.ts';
 import type { DomainTargetConfig } from '../targets/domain.ts';
@@ -150,8 +150,11 @@ export function assertJournalScope(edits: Edit[], root: string, manifestFile: st
       (edit.after !== null && typeof edit.after !== 'string')
     )
       throw new Error('恢复记录格式无效');
-    const path = relative(root, edit.path);
-    if (edit.path !== manifestFile && (isAbsolute(path) || path === '..' || path.startsWith('../')))
+    // 用平台分隔符判断「跳出 root」：Windows 上 relative() 返回 ..\other\x，
+    // 只认 ../ 会把另一个数据目录的恢复记录放过去（CI 在 windows-latest 上就是这么挂的）。
+    const rel = relative(root, edit.path);
+    const outsideRoot = isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`);
+    if (edit.path !== manifestFile && outsideRoot)
       throw new Error('未完成事务属于另一个客户端数据目录，请使用原客户端恢复');
   }
 }
