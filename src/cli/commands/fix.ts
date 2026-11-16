@@ -322,6 +322,9 @@ async function runInternal(context: CommandContext): Promise<number> {
 }
 
 export async function run(context: CommandContext): Promise<number> {
+  // 参数自相矛盾时先报用法错误：不该因为别人（定时任务、另一个终端）正持锁，
+  // 就把「--group 和域名混用」这类写法错误报成环境故障。
+  resolveFixRequest(context, []);
   const release = acquireLock();
   try {
     if (existsSync(join(stateDir(), 'binding-transaction.json')))
