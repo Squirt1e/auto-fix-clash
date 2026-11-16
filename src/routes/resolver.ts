@@ -60,7 +60,7 @@ export interface PolicyResolution {
 
 const BUILTIN_NAMES = new Set(['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE']);
 
-export function resolvePolicy(policy: string, proxies: Record<string, ProxyInfo>): PolicyResolution {
+export function resolvePolicy(policy: string, proxies: Record<string, ProxyInfo>, explicitGroups?: ReadonlySet<string>): PolicyResolution {
   const chain: string[] = [];
   const visited = new Set<string>();
   let current = policy;
@@ -82,6 +82,7 @@ export function resolvePolicy(policy: string, proxies: Record<string, ProxyInfo>
       return { chain, issue: { kind: 'policy-missing', reason: `控制器中找不到策略 “${current}”` } };
     }
     if (info.type === 'Selector') {
+      if (explicitGroups?.has(current)) return { group: current, chain };
       deepestSelector = current;
       if (!info.now) {
         return { chain, issue: { kind: 'policy-missing', reason: `Selector “${current}” 没有当前选中成员` } };
@@ -254,6 +255,7 @@ function evaluateRules(
 }
 
 export interface RouteResolveOptions {
+  explicitGroups?: ReadonlySet<string>;
   runtimeRules?: readonly RuntimeRuleMetadata[];
   resolveAddresses?: (host: string) => Promise<readonly string[]>;
 }
@@ -325,7 +327,7 @@ export async function resolveDomainRoutes(
         continue;
       }
       const matchedRules = evaluations.flatMap((evaluation) => 'rule' in evaluation ? [evaluation.rule] : []);
-      const policies = matchedRules.map((rule) => ({ rule, resolution: resolvePolicy(rule.proxy, proxies) }));
+      const policies = matchedRules.map((rule) => ({ rule, resolution: resolvePolicy(rule.proxy, proxies, options.explicitGroups) }));
       const outcomes = new Set(policies.map(({ resolution }) => resolution.group
         ? `group:${resolution.group}`
         : `issue:${resolution.issue?.kind ?? 'policy-missing'}:${resolution.issue?.reason ?? ''}`));

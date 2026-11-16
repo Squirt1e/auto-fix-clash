@@ -11,6 +11,7 @@ import {
 import { isGroupIndexArg, resolveGroupArg } from './groups-index.ts';
 import { resolveKernelBinary } from '../paths.ts';
 import { expandAutoTargets } from '../targets/auto.ts';
+import { genericTarget, matchPreset, presetToTarget } from '../targets/presets.ts';
 import { optBoolean, optString, resolveTargets, type CommandContext } from './context.ts';
 
 export interface Runtime {
@@ -119,10 +120,21 @@ export async function planTargets(
   /** 已获取的 /proxies 结果，避免重复请求。 */
   knownProxies?: Record<string, ProxyInfo>,
 ): Promise<PlannedTargets> {
-  const group = optString(withResolvedGroup(context.values), 'group');
+  const menu = optBoolean(context.values, 'menu');
+  const group = optString(menu ? context.values : withResolvedGroup(context.values), 'group');
   const config = runtime.config;
 
   if (group) {
+    if (menu) {
+      const proxies = knownProxies ?? await client.proxies();
+      if (!proxies[group] || !isGroup(proxies[group])) throw new Error('代理组已不存在，请重新选择。');
+      const configured = config.targets.find((target) => findGroupName(target, [group]) === group);
+      const preset = matchPreset(group);
+      const target = configured ? { ...configured, name: group }
+        : preset?.confidence === 'high' ? presetToTarget(preset, group) : genericTarget(group);
+      return { plans: [{ groupName: group, target, source: configured ? 'configured' : 'auto',
+        note: configured ? '已配置的检测规则' : '默认检测规则' }], skipped: [] };
+    }
     const target = requireTarget(config, group);
     return {
       plans: [{ groupName: target.name, target, source: 'configured', note: '配置里声明的判据' }],

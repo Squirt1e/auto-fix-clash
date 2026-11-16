@@ -2,11 +2,7 @@ import type { AfcConfig, TargetConfig } from '../config.ts';
 import type { MihomoClient } from '../controller/client.ts';
 import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK } from '../exit-codes.ts';
 import type { ProbePolicy } from '../probe/engine.ts';
-import {
-  resolveDomainRoutes,
-  type ResolvedBinding,
-  type RouteIssue,
-} from '../routes/resolver.ts';
+import { resolveDomainRoutes, type ResolvedBinding, type RouteIssue } from '../routes/resolver.ts';
 import type { RuntimeRuleMetadata } from '../routes/runtime-rules.ts';
 import {
   DEFAULT_DOMAIN_TARGETS,
@@ -14,11 +10,7 @@ import {
   type DomainPattern,
   type DomainTargetConfig,
 } from '../targets/domain.ts';
-import {
-  repairGroup,
-  type GroupRepairOptions,
-  type RepairOutcome,
-} from './repair.ts';
+import { repairGroup, type GroupRepairOptions, type RepairOutcome } from './repair.ts';
 
 export interface DomainRepairIssue {
   pattern?: string;
@@ -44,12 +36,19 @@ export interface RepairDomainsOptions {
   dryRun?: boolean;
   onNotice?: (message: string) => void;
   repairer?: (options: GroupRepairOptions) => Promise<RepairOutcome>;
+  explicitGroups?: ReadonlySet<string>;
+  bindingTargets?: { group: string; target: DomainTargetConfig }[];
+  inlineProxies?: unknown[];
+  beforeSelect?: () => Promise<void>;
   runtimeRules?: readonly RuntimeRuleMetadata[];
 }
 
 function asTarget(
   name: string,
-  source: Pick<DomainTargetConfig, 'probe' | 'extraProbes' | 'geoProbe' | 'countryAllow' | 'countryDeny'>,
+  source: Pick<
+    DomainTargetConfig,
+    'probe' | 'extraProbes' | 'geoProbe' | 'countryAllow' | 'countryDeny'
+  >,
 ): TargetConfig {
   if (!source.probe) throw new Error(`域名目标 ${name} 没有探测端点`);
   return {
@@ -66,17 +65,21 @@ function asTarget(
 export function policyForDomain(target: DomainTargetConfig, witness: string): ProbePolicy {
   const requested = parseDomainPattern(target.pattern);
   const chatgptPattern = parseDomainPattern(DEFAULT_DOMAIN_TARGETS[0]!.pattern);
-  const preset = requested.apex === chatgptPattern.apex || requested.apex.endsWith(`.${chatgptPattern.apex}`)
-    ? DEFAULT_DOMAIN_TARGETS[0]
-    : undefined;
+  const preset =
+    requested.apex === chatgptPattern.apex || requested.apex.endsWith(`.${chatgptPattern.apex}`)
+      ? DEFAULT_DOMAIN_TARGETS[0]
+      : undefined;
   const source = target.probe ? target : preset;
-  const geoProbe = target.overrides?.geoProbe || target.geoProbe ? target.geoProbe : source?.geoProbe;
-  const countryAllow = target.overrides?.countryAllow || target.countryAllow.length > 0
-    ? target.countryAllow
-    : (source?.countryAllow ?? []);
-  const countryDeny = target.overrides?.countryDeny || target.countryDeny.length > 0
-    ? target.countryDeny
-    : (source?.countryDeny ?? []);
+  const geoProbe =
+    target.overrides?.geoProbe || target.geoProbe ? target.geoProbe : source?.geoProbe;
+  const countryAllow =
+    target.overrides?.countryAllow || target.countryAllow.length > 0
+      ? target.countryAllow
+      : (source?.countryAllow ?? []);
+  const countryDeny =
+    target.overrides?.countryDeny || target.countryDeny.length > 0
+      ? target.countryDeny
+      : (source?.countryDeny ?? []);
 
   if (source?.probe) {
     return {
@@ -111,24 +114,32 @@ function policiesForDomain(target: DomainTargetConfig, witness: string): ProbePo
   const primary = policyForDomain(target, witness);
   const requested = parseDomainPattern(target.pattern);
   const chatgpt = parseDomainPattern(DEFAULT_DOMAIN_TARGETS[0]!.pattern);
-  const preset = requested.apex === chatgpt.apex || requested.apex.endsWith(`.${chatgpt.apex}`)
-    ? DEFAULT_DOMAIN_TARGETS[0]
-    : undefined;
-  const extras = target.overrides?.extraProbes || target.extraProbes.length > 0
-    ? target.extraProbes
-    : (preset?.extraProbes ?? []);
-  return [primary, ...extras.map((probe, index) => ({
-    label: `${target.pattern} 附加判据 ${index + 1}`,
-    target: {
-      name: target.pattern,
-      aliases: [],
-      probe,
-      extraProbes: [],
-      countryAllow: [],
-      countryDeny: [],
-    },
-    confidence: primary.confidence,
-  } satisfies ProbePolicy))];
+  const preset =
+    requested.apex === chatgpt.apex || requested.apex.endsWith(`.${chatgpt.apex}`)
+      ? DEFAULT_DOMAIN_TARGETS[0]
+      : undefined;
+  const extras =
+    target.overrides?.extraProbes || target.extraProbes.length > 0
+      ? target.extraProbes
+      : (preset?.extraProbes ?? []);
+  return [
+    primary,
+    ...extras.map(
+      (probe, index) =>
+        ({
+          label: `${target.pattern} 附加判据 ${index + 1}`,
+          target: {
+            name: target.pattern,
+            aliases: [],
+            probe,
+            extraProbes: [],
+            countryAllow: [],
+            countryDeny: [],
+          },
+          confidence: primary.confidence,
+        }) satisfies ProbePolicy,
+    ),
+  ];
 }
 
 export async function repairDomains(options: RepairDomainsOptions): Promise<DomainRepairReport> {
@@ -145,14 +156,14 @@ export async function repairDomains(options: RepairDomainsOptions): Promise<Doma
     proxies,
     typeof configs['mode'] === 'string' ? configs['mode'] : '',
     {
+      ...(options.explicitGroups ? { explicitGroups: options.explicitGroups } : {}),
       ...(options.runtimeRules ? { runtimeRules: options.runtimeRules } : {}),
       resolveAddresses: async (host) => await options.client.resolveHost(host),
     },
   );
-  const targetsByPattern = new Map(options.targets.map((target) => [
-    parseDomainPattern(target.pattern).input,
-    target,
-  ]));
+  const targetsByPattern = new Map(
+    options.targets.map((target) => [parseDomainPattern(target.pattern).input, target]),
+  );
   const outcomes: RepairOutcome[] = [];
   const issues: DomainRepairIssue[] = resolution.issues.map((issue: RouteIssue) => ({ ...issue }));
 
@@ -172,21 +183,32 @@ export async function repairDomains(options: RepairDomainsOptions): Promise<Doma
         if (!policiesByKey.has(key)) policiesByKey.set(key, policy);
       }
     }
+    for (const entry of options.bindingTargets ?? []) {
+      if (entry.group !== binding.group) continue;
+      const target = entry.target;
+      for (const policy of policiesForDomain(target, parseDomainPattern(target.pattern).apex)) {
+        policiesByKey.set(JSON.stringify(policy.target), policy);
+      }
+    }
     const policies = [...policiesByKey.values()];
     try {
-      outcomes.push(await repairer({
-        config: options.config,
-        groupName: binding.group,
-        policies,
-        client: options.client,
-        knownProxies: proxies,
-        ...(options.config.probe.runtimeConfigPath
-          ? { runtimeConfigPath: options.config.probe.runtimeConfigPath }
-          : {}),
-        ...(options.force === undefined ? {} : { force: options.force }),
-        ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
-        ...(options.onNotice ? { onNotice: options.onNotice } : {}),
-      }));
+      outcomes.push(
+        await repairer({
+          config: options.config,
+          groupName: binding.group,
+          policies,
+          client: options.client,
+          knownProxies: proxies,
+          ...(options.inlineProxies ? { inlineProxies: options.inlineProxies } : {}),
+          ...(options.beforeSelect ? { beforeSelect: options.beforeSelect } : {}),
+          ...(options.config.probe.runtimeConfigPath
+            ? { runtimeConfigPath: options.config.probe.runtimeConfigPath }
+            : {}),
+          ...(options.force === undefined ? {} : { force: options.force }),
+          ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
+          ...(options.onNotice ? { onNotice: options.onNotice } : {}),
+        }),
+      );
     } catch (err) {
       issues.push({
         group: binding.group,
@@ -196,10 +218,11 @@ export async function repairDomains(options: RepairDomainsOptions): Promise<Doma
     }
   }
 
-  const exitCode = issues.length > 0 || outcomes.some((outcome) => outcome.plan.action === 'stale')
-    ? EXIT_ENVIRONMENT
-    : outcomes.some((outcome) => outcome.plan.action === 'no-candidate')
-      ? EXIT_NO_USABLE_NODE
-      : EXIT_OK;
+  const exitCode =
+    issues.length > 0 || outcomes.some((outcome) => outcome.plan.action === 'stale')
+      ? EXIT_ENVIRONMENT
+      : outcomes.some((outcome) => outcome.plan.action === 'no-candidate')
+        ? EXIT_NO_USABLE_NODE
+        : EXIT_OK;
   return { bindings: resolution.bindings, outcomes, issues, exitCode };
 }

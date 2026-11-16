@@ -95,13 +95,15 @@ export async function run(context: CommandContext): Promise<number> {
       // 进度用单行覆盖，且只在终端里输出：管道/日志下不产生噪音
       results = await engine.probeAll(candidates, target, (result, index) => {
         if (quiet || json || !interactive()) return;
-        process.stderr.write(
+        const notice = context.values['on-notice'];
+        if (typeof notice === 'function') notice(`检测 ${index + 1}/${candidates.length} · ${result.node} · ${VERDICT_LABEL[result.verdict]}`);
+        else process.stderr.write(
           `\r  探测 ${index + 1}/${candidates.length}　${pad(result.node, 22)}${VERDICT_LABEL[result.verdict]}　　`,
         );
       });
     } finally {
       await engine.close();
-      if (!quiet && !json) clearProgressLine();
+      if (!quiet && !json && typeof context.values['on-notice'] !== 'function') clearProgressLine();
     }
 
     anyProbed = true;

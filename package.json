@@ -68,6 +68,9 @@
     "prepack": "npm run build"
   },
   "dependencies": {
+    "@inquirer/core": "^10.3.2",
+    "@inquirer/prompts": "^7.10.1",
+    "@xterm/headless": "^5.5.0",
     "yaml": "^2.8.0"
   },
   "devDependencies": {

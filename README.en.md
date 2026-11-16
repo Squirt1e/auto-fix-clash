@@ -10,7 +10,7 @@ country-blocked.
 
 - Scoped by **domain**, not by group name: re-resolved from `/rules`, `/proxies`, `/configs` every run,
   so a renamed or reshuffled subscription keeps working
-- Only switches the selected node through the control API — **never rewrites your Clash config**
+- `fix` switches nodes only through the control API; explicit `bind` / `unbind` manage persistent client overrides and routing rules
 - macOS / Linux / Windows, with Clash Party, Clash Verge (Rev), ClashX Meta or any mihomo kernel
 
 ## What it solves
@@ -23,11 +23,14 @@ country-blocked.
 
 ```bash
 npm i -g auto-fix-clash            # Node.js >= 20
+afc                              # open the menu: groups / websites / timer / settings
 afc fix '*.chatgpt.com'            # repair now (quote the * so your shell keeps it)
 afc schedule install               # then re-check every 5 minutes
 afc schedule add '*.example.com'   # manage another site: register its scope
 afc schedule list                  # list registered scopes
 ```
+
+For everyday use, run `afc`: use ↑↓ to select, ← to go back, and → or Enter to confirm a menu option. Left and right arrows still move the cursor in text inputs. The menu uses a separate screen for the current page, preserves selections and searches when you return, and restores your terminal on exit. Use PgUp/PgDn for long results; type to filter lists and press Tab to switch between the search field and menu options. The menu can inspect, probe and repair groups, add websites, and manage bindings and scheduled repairs. For binding changes, you exit and start Clash Party manually; the menu never restarts the client. Offline saves are marked as awaiting activation checks. The existing commands remain available through `afc --help`; pipes and scripts do not open the menu. Menu labels and messages are in Chinese.
 
 `*.` includes the **apex domain itself** and every subdomain level. To stop: `afc schedule uninstall`.
 
@@ -46,6 +49,22 @@ changed and only that node is probed (~2s); `--force` rotates anyway.
 | `afc groups` / `afc doctor` | list proxy groups / probe every node (group-based, no domain argument) |
 
 Add `--help` to any command. The legacy group-based mode (`afc add`, `afc fix --group/--all`) is still available.
+
+## Bind a domain when route resolution fails
+
+Binding initially supports **macOS Clash Party with inline node definitions**:
+
+```bash
+afc bind '*.chatgpt.com' --group 'GPT' --restart-client
+afc bind '*.chatgpt.com' --group 'AFC-AI' --create --restart-client
+afc fix '*.chatgpt.com'
+```
+
+For manual lifecycle control, exit Party yourself, then use `--offline --client-dir <Party data directory>` instead of `--restart-client`. AFC refuses offline writes while Party is running. Start Party yourself and verify with `afc bind --list`; offline saving does not prove activation.
+
+The current subscription receives persistent overrides and leading domain rules. `--restart-client` permits a brief client restart, interrupting proxy connections. Use `--dry-run` to preview, `--replace` to change a binding or its probe policy, and `afc bind --list` to inspect bindings. Names are exact, not group indices. New groups automatically collect inline nodes after subscription updates.
+
+`afc unbind '*.chatgpt.com' --restart-client` removes the binding, retaining created groups to protect external references. Existing groups retain their members and selection. Binding does not run repair or register a scheduled target. All probe policies of domains sharing a group constrain future repairs.
 
 ## Behaviour and limits
 

@@ -42,7 +42,7 @@ export interface MihomoRule {
 export const GROUP_TYPES = new Set(['Selector', 'URLTest', 'Fallback', 'LoadBalance', 'Relay', 'Smart']);
 
 /** 内置策略类型：既不是代理组，也不是可拨号的真实节点。 */
-export const BUILTIN_TYPES = new Set(['Direct', 'Reject', 'RejectDrop', 'Compatible', 'Pass', 'Dns', 'Unknown']);
+export const BUILTIN_TYPES = new Set(['Direct', 'Reject', 'RejectDrop', 'Compatible', 'Pass', 'PassRule', 'Dns', 'Unknown']);
 
 /** 判定一个 /proxies 条目是否为代理组（而非真实节点）。 */
 export function isGroup(info: ProxyInfo): boolean {

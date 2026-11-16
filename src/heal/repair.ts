@@ -11,9 +11,9 @@ export class GroupNotSwitchableError extends UsageError {
   constructor(group: string, type: string) {
     super(
       `代理组 “${group}” 的类型是 ${type}，不是可稳定指定的 Selector。\n` +
-      '自动选择型组（URLTest / Fallback / LoadBalance）会被内核下次体检覆盖，' +
-      '因此本工具只对 Selector 组执行切换。可在 Clash 中把该组改为手动选择组，' +
-      '或改为配置一个 Selector 类型的目标组。',
+        '自动选择型组（URLTest / Fallback / LoadBalance）会被内核下次体检覆盖，' +
+        '因此本工具只对 Selector 组执行切换。可在 Clash 中把该组改为手动选择组，' +
+        '或改为配置一个 Selector 类型的目标组。',
     );
     this.name = 'GroupNotSwitchableError';
   }
@@ -30,14 +30,15 @@ export class TargetGroupMissingError extends UsageError {
   readonly availableGroups: string[];
 
   constructor(target: TargetConfig, availableGroups: string[]) {
-    const aliasHint = target.aliases.length > 0 ? `（已尝试的别名：${target.aliases.join('、')}）` : '';
+    const aliasHint =
+      target.aliases.length > 0 ? `（已尝试的别名：${target.aliases.join('、')}）` : '';
     super(
       `当前订阅里没有代理组 “${target.name}”${aliasHint}。\n` +
-      `当前订阅实际存在的组：${availableGroups.join(', ') || '（无）'}\n` +
-      '如果只是另一个订阅里叫法不同，把那个名字写进该目标的 name 或 aliases 即可，例如：\n' +
-      `  - name: ${target.name}\n` +
-      '    aliases: [<上面列表里对应的那个名字>]\n' +
-      '用 afc groups 可以查看当前订阅有哪些组、以及各组是否受 afc 管理。',
+        `当前订阅实际存在的组：${availableGroups.join(', ') || '（无）'}\n` +
+        '如果只是另一个订阅里叫法不同，把那个名字写进该目标的 name 或 aliases 即可，例如：\n' +
+        `  - name: ${target.name}\n` +
+        '    aliases: [<上面列表里对应的那个名字>]\n' +
+        '用 afc groups 可以查看当前订阅有哪些组、以及各组是否受 afc 管理。',
     );
     this.name = 'TargetGroupMissingError';
     this.targetName = target.name;
@@ -62,6 +63,8 @@ export interface RepairOptions {
 }
 
 export interface GroupRepairOptions {
+  inlineProxies?: unknown[];
+  beforeSelect?: () => Promise<void>;
   config: AfcConfig;
   groupName: string;
   policies: ProbePolicy[];
@@ -139,7 +142,7 @@ export async function repairGroup(options: GroupRepairOptions): Promise<RepairOu
   const { config, groupName, client, policies } = options;
   const notice = options.onNotice ?? ((): void => {});
   const engineFactory = options.engineFactory ?? defaultEngineFactory;
-  const allProxies = options.knownProxies ?? await client.proxies();
+  const allProxies = options.knownProxies ?? (await client.proxies());
   const groupInfo = allProxies[groupName];
   if (!groupInfo || !isGroup(groupInfo)) {
     throw new UsageError(`当前订阅里没有代理组 “${groupName}”。`);
@@ -148,24 +151,37 @@ export async function repairGroup(options: GroupRepairOptions): Promise<RepairOu
 
   const groupCandidates = (groupInfo.all ?? []).filter((name) => isRealNode(allProxies[name]));
   if (groupCandidates.length === 0) {
-    throw new UsageError(`代理组 “${groupName}” 中没有可作为出口的真实节点（可能只包含其它代理组）。`);
+    throw new UsageError(
+      `代理组 “${groupName}” 中没有可作为出口的真实节点（可能只包含其它代理组）。`,
+    );
   }
 
-  const definitions = loadNodeDefinitions({
-    ...(options.runtimeConfigPath ? { runtimeConfigPath: options.runtimeConfigPath } : {}),
-    neededNodeNames: groupCandidates,
-  });
+  const definitions = options.inlineProxies
+    ? {
+        proxies: options.inlineProxies,
+        nodeNames: options.inlineProxies.flatMap((p) =>
+          typeof p === 'object' && p !== null && 'name' in p && typeof p.name === 'string'
+            ? [p.name]
+            : [],
+        ),
+      }
+    : loadNodeDefinitions({
+        ...(options.runtimeConfigPath ? { runtimeConfigPath: options.runtimeConfigPath } : {}),
+        neededNodeNames: groupCandidates,
+      });
   // 探针实例只能使用它自己配置里存在的节点定义；订阅若走 proxy-providers，
   // 运行时配置的 proxies 段可能是空的，此时给出明确指引而不是静默失败。
   const candidates = groupCandidates.filter((name) => definitions.nodeNames.includes(name));
   if (candidates.length === 0) {
     throw new Error(
       `代理组 “${groupName}” 的节点在运行时配置的 proxies 段中找不到定义，无法构造探针实例。\n` +
-      '如果你的订阅使用 proxy-providers 下发节点，请改用在内核运行时配置中能直接看到节点定义的前端/配置。',
+        '如果你的订阅使用 proxy-providers 下发节点，请改用在内核运行时配置中能直接看到节点定义的前端/配置。',
     );
   }
   if (candidates.length < groupCandidates.length) {
-    notice(`有 ${groupCandidates.length - candidates.length} 个成员在运行时配置中没有节点定义，已跳过。`);
+    notice(
+      `有 ${groupCandidates.length - candidates.length} 个成员在运行时配置中没有节点定义，已跳过。`,
+    );
   }
 
   const currentNode = groupInfo.now;
@@ -203,9 +219,13 @@ export async function repairGroup(options: GroupRepairOptions): Promise<RepairOu
     const remaining = candidates.filter((name) => name !== currentNode);
     notice(
       `${options.force ? '强制换点' : '当前节点不可用'}，按顺序筛查 ${remaining.length} 个候选节点` +
-      `（并发上限 ${config.probe.concurrency}，筛查超时 ${config.probe.screenTimeoutMs}ms，找到可用即停止）…`,
+        `（并发上限 ${config.probe.concurrency}，筛查超时 ${config.probe.screenTimeoutMs}ms，找到可用即停止）…`,
     );
-    const { result: chosen, screened, lastScreened } = remaining.length > 0
+    const {
+      result: chosen,
+      screened,
+      lastScreened,
+    } = remaining.length > 0
       ? await engine.findFirstUsableForAll(remaining, policies, config.probe.screenTimeoutMs)
       : { screened: 0, lastScreened: undefined };
 
@@ -223,7 +243,13 @@ export async function repairGroup(options: GroupRepairOptions): Promise<RepairOu
 
     let applied = false;
     if (plan.action === 'switch' && plan.to && !options.dryRun) {
+      await options.beforeSelect?.();
       const latest = await client.proxy(groupName);
+      if (
+        latest.type !== groupInfo.type ||
+        JSON.stringify(latest.all) !== JSON.stringify(groupInfo.all)
+      )
+        throw new Error('探测期间组成员发生变化，取消切换');
       if (latest.now !== currentNode) {
         return {
           group: groupName,

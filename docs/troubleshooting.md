@@ -131,7 +131,9 @@ afc 只在**能证明**路由时才动你的组，证明不了就报告不完整
 
 ## afc 会写哪些文件
 
-不会动你的 Clash 配置。它只写这几处：
+普通 `fix` 不写 Clash 配置。显式 `bind/unbind` 会在当前 Party 数据目录管理 `profile.yaml` 的覆写引用、`override.yaml`、AFC 自有覆写和 `rules/<profileId>.yaml` 的前置规则；不改原始订阅。绑定状态保存在用户级 AFC 配置目录的 `bindings.json`，事务期间会有权限受限的恢复记录。绑定只属于指定订阅，不随切换传播；回切后重新生效。
+
+其他写入包括：
 
 - 系统调度器的任务定义：macOS `~/Library/LaunchAgents/`、Linux `~/.config/systemd/user/` 或 crontab、
   Windows 的任务计划程序数据库
@@ -139,3 +141,55 @@ afc 只在**能证明**路由时才动你的组，证明不了就报告不完整
 - 你自己用 `afc schedule add` 指定的那份 afc 配置文件
 
 `afc schedule uninstall` 会把任务与日志一起删除。
+
+## 绑定失败或重启中断
+
+`bind` 首版仅支持 macOS Clash Party 的 Unix 控制端点及可提取完整内联定义的节点。非 Selector、只含嵌套组或 provider-only 候选会在写入前拒绝。无 `--restart-client` 时不会修改配置。
+
+若进程中断留下 `binding-transaction.json`，先启动原 Party，再执行 `afc bind --restart-client` 恢复，恢复完成后重试原命令。恢复记录可能包含原配置，勿公开其正文。文件被其他程序改动时会保留记录并停止，避免覆盖外部修改。规则或生成覆写被手动修改后，`fix` 会报告漂移并停止对应修复。
+
+## 由你手动操作的本机绑定验证（不由 AFC 退出客户端）
+
+以下步骤使用本仓库刚构建的程序，避免误用尚未升级的全局 `afc`。我不会代你执行其中的退出、启动或订阅刷新。
+
+1. 保持 Party 运行，先在本仓库执行 `npm run build`，然后预览：
+
+   ```bash
+   node dist/cli/index.js bind '*.chatgpt.com' --group 'AFC-Validation' --create --dry-run
+   ```
+
+   预期输出“仅预览，未写入、未重启”。记录当前订阅和原代理组的选择。
+
+2. 在 Party 菜单中由你选择退出，确认主进程及内核均已退出。仅关闭窗口会保留后台进程，不满足离线写入要求。此时代理网络可能短暂中断。
+
+3. 退出后先在 Finder 将 `~/Library/Application Support/mihomo-party` 复制到一个本地备份位置（其中可能有订阅凭据，不要上传或分享）；如已有 `~/.config/afc/bindings.json`，也备份该文件。然后执行离线绑定：
+
+   ```bash
+   node dist/cli/index.js bind '*.chatgpt.com' --group 'AFC-Validation' --create \
+     --offline --client-dir "$HOME/Library/Application Support/mihomo-party"
+   ```
+
+   使用自定义/便携目录时替换路径。命令不会退出或启动任何客户端；若 Party 还在运行，会拒绝写入。预期输出“已离线保存，尚未验证生效”。离线命令退出码 0 表示保存成功，不能代替下一步的实时验收。
+
+4. 由你手动启动 Party，然后执行：
+
+   ```bash
+   node dist/cli/index.js bind --list --json
+   node dist/cli/index.js fix '*.chatgpt.com' --dry-run
+   ```
+
+   预期绑定条目为 `active: true`；修复输出指向 `AFC-Validation`，不再被前置 GEOIP/IP-CIDR 阻塞；`--dry-run` 不切换节点。网页本身的探测仍可能因出口不可用返回无可用候选，这与路由绑定生效是两个验证结果。
+
+5. 在 Party 中由你刷新同一订阅，再执行 `bind --list --json`；绑定仍应 active，组成员应随内联节点更新。切换其他订阅时不应自动出现该绑定，切回后应恢复。已有组的成员与选择应保持。
+
+6. 撤销测试：由你退出 Party，执行下列命令，再手动启动并检查列表及实际规则：
+
+   ```bash
+   node dist/cli/index.js unbind '*.chatgpt.com' \
+     --offline --client-dir "$HOME/Library/Application Support/mihomo-party"
+   node dist/cli/index.js bind --list --json
+   ```
+
+   最后一条要在手动启动后运行。域名规则及绑定应消失；首版保留自建组，避免删除未知外部引用。若复用已有组而非新建组，将步骤 1/3 的组名换成现有 Selector 名称并去掉 `--create`；全程应保留该组原选择。
+
+如果某一步失败，保留命令输出与退出码即可，不要公开订阅 URL、节点凭据或事务记录正文。当前自动退出路径尚未通过本机端到端验收，推荐先使用上述手动离线流程。

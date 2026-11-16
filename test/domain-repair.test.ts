@@ -225,3 +225,16 @@ test('路由输出包含域名、规则依据、代理组和判据可信度', as
   assert.match(text, /规则 #1 MATCH/);
   assert.match(text, /只能证明 HTTPS 可达/);
 });
+
+test('explicit bound group remains repair boundary and merges all stored domain policies', async()=>{
+ const client=fakeClient([rule(0,'DOMAIN','chatgpt.com','GPT')]);
+ const calls:GroupRepairOptions[]=[];
+ const report=await repairDomains({config:loadConfig(),targets:[domain('chatgpt.com')],client,
+  explicitGroups:new Set(['GPT']),bindingTargets:[{group:'GPT',target:domain('other.example')},{group:'DEFAULT',target:domain('unrelated.example')}],
+  repairer:async options=>{calls.push(options);return kept(options.groupName);},
+ });
+ assert.equal(report.exitCode,0);assert.equal(calls.length,1);
+ const urls=calls[0]!.policies.map(p=>p.target.probe.url);
+ assert.ok(urls.includes('https://other.example/'));assert.ok(!urls.includes('https://unrelated.example/'));
+ assert.ok(urls.some(u=>u.includes('backend-api/codex/responses')));
+});

@@ -9,7 +9,7 @@ import {
   writeConfigText,
 } from '../../config-edit.ts';
 import { UsageError } from '../../errors.ts';
-import { EXIT_OK, EXIT_USAGE } from '../../exit-codes.ts';
+import { EXIT_ENVIRONMENT, EXIT_OK, EXIT_USAGE } from '../../exit-codes.ts';
 import { afcStateDir, currentPlatform, joinFor, type PlatformContext } from '../../platform.ts';
 import { DEFAULT_DOMAIN_TARGETS, parseDomainPattern, type DomainTargetConfig } from '../../targets/domain.ts';
 import {
@@ -149,6 +149,13 @@ export async function run(context: CommandContext): Promise<number> {
 
       const result = await backend.install(options);
       writeScheduleMetadata(ctx, configPath);
+      if (optBoolean(context.values, 'menu')) {
+        process.stdout.write(result.loaded
+          ? `✓ 定时已开启，每 ${interval} 秒运行，无需重启客户端。\n`
+          : '定时已保存，但未载入。请重试开启。\n');
+        if (config.domains.length === 0) process.stdout.write('网站列表为空，请先添加网站。\n');
+        return result.loaded ? EXIT_OK : EXIT_ENVIRONMENT;
+      }
       process.stdout.write(
         `已安装周期性修复任务（后端：${result.backend}）：每 ${interval} 秒运行一次` +
         `${result.replaced ? '，已覆盖同名旧任务' : ''}\n` +
@@ -167,6 +174,10 @@ export async function run(context: CommandContext): Promise<number> {
 
     case 'uninstall': {
       const result = await backend.uninstall(true);
+      if (optBoolean(context.values, 'menu')) {
+        process.stdout.write('✓ 定时已关闭，日志已删除，无需重启客户端。\n');
+        return EXIT_OK;
+      }
       process.stdout.write(
         `已卸载周期性修复任务（后端：${result.backend}）。\n  ${result.message}\n` +
         (result.removed.length > 0
@@ -281,6 +292,10 @@ function handleDomainAction(
     const materializeDefaults = !/^domains:/m.test(text);
     writeConfigText(path, addDomainToConfigText(text, target, materializeDefaults));
     emitInstalledConfigWarning(currentPlatform(), path);
+    if (optBoolean(context.values, 'menu')) {
+      process.stdout.write(`✓ 已添加 ${target.pattern}。\n`);
+      return EXIT_OK;
+    }
     process.stdout.write(
       `已登记定时修复域名：${target.pattern}\n  配置：${path}\n` +
       '如果系统任务已经安装，请重跑 afc schedule install 以确认它指向这份配置。\n',

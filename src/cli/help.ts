@@ -1,13 +1,15 @@
 /** 顶层帮助：只放"要做什么、用哪条命令"，细节放到各命令自己的帮助里。 */
 export const TOP_HELP = `afc — 让 Clash 代理组自动选中「真正能用」的节点
 
-用法：afc <命令> [选项]
+用法：afc                       打开菜单（代理组 / 网站 / 定时 / 设置）
+      afc <命令> [选项]         直接执行命令
 
   fix <域名|*.域名>              立即找出该网站经过的代理组并修复
   schedule add <域名|*.域名>     添加一个定时修复的网站
   schedule list                  查看已添加的网站
   schedule remove <域名|序号>    按域名或 list 序号移除网站
   schedule install / status      安装定时任务 / 查看运行状态
+  bind / unbind <域名>           绑定指定代理组 / 解除绑定
   groups / doctor                查看代理组 / 体检节点
   add / remove <组名>            旧版按组配置（组名固定时使用）
 
@@ -17,7 +19,6 @@ export const TOP_HELP = `afc — 让 Clash 代理组自动选中「真正能用�
 
 添加网站并立即使用：
   afc schedule add '*.example.com'
-  afc schedule list
   afc fix '*.chatgpt.com' --force
 
 处理范围：*.example.com 同时包含裸域；每次按当前规则重新定位所有确认的代理组。
@@ -55,7 +56,8 @@ export const SCHEDULE_HELP = `用法：afc schedule <add|list|remove|install|uni
 
 export const ADD_HELP = `用法：afc add <组名|编号> [选项]
 
-把某个组加入管理，使其参与定时修复。
+保存某个组的检测规则，供按组修复与体检使用。
+定时任务按网站运行，请用 afc schedule add <域名> 添加网站。
 
 判据会自动挑：命中内置预设就用预设的（GPT / Telegram / Google / Github），
 否则用通用可达性判据（只在节点彻底不通时才换，不会换掉你特意选的地区）。
@@ -150,7 +152,21 @@ const FIX_HELP = `用法：afc fix [域名|*.域名] [选项]
   afc fix '*.chatgpt.com' --force
 `;
 
+const BIND_HELP = `用法：afc bind <域名|*.域名> --group <名称> [选项]
+  --create          组不存在时创建 Selector
+  --replace         更换已登记的目标组或探测判据
+  --restart-client  允许短暂退出并启动 Clash Party，以加载持久化配置
+  --offline --client-dir <目录>  由你手动退出 Party 后离线保存；AFC 不退出或启动客户端
+  --dry-run         预览，不写入、不重启
+  --list [--json]   查看当前订阅的绑定与生效状态
+首版支持 macOS Clash Party 的内联节点订阅。组名按完整名称匹配，不使用编号。
+bind 不立即修复、不添加计划任务；随后执行 afc fix '<域名>'。
+离线保存后请手动启动 Party，用 bind --list 验证；输出“已保存”不代表实时生效。
+解除绑定：afc unbind '<域名>' --restart-client（保留自建组，避免破坏外部引用）。
+`;
 export const COMMAND_HELP: Record<string, string> = {
+  bind: BIND_HELP,
+  unbind: BIND_HELP,
   groups: GROUPS_HELP,
   doctor: DOCTOR_HELP,
   fix: FIX_HELP,

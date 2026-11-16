@@ -31,6 +31,8 @@ const loadCommand = (name: string): Promise<{ run: CommandHandler }> =>
   import(`./commands/${name}.ts`) as Promise<{ run: CommandHandler }>;
 
 const COMMANDS: Record<string, { summary: string; run: () => Promise<CommandHandler> }> = {
+  bind: { summary: '绑定域名到代理组', run: async () => (await loadCommand('bind')).run },
+  unbind: { summary: '解除域名绑定', run: async () => (await loadCommand('unbind')).run },
   doctor: { summary: '体检目标组的候选节点', run: async () => (await loadCommand('doctor')).run },
   fix: { summary: '按粘性策略修复代理组', run: async () => (await loadCommand('fix')).run },
   add: { summary: '把一个组加入配置', run: async () => (await loadCommand('add')).run },
@@ -99,6 +101,12 @@ export async function main(argv: string[]): Promise<number> {
         config: { type: 'string' },
         json: { type: 'boolean', default: false },
         group: { type: 'string' },
+        offline: { type: 'boolean', default: false },
+        'client-dir': { type: 'string' },
+        create: { type: 'boolean', default: false },
+        replace: { type: 'boolean', default: false },
+        list: { type: 'boolean', default: false },
+        'restart-client': { type: 'boolean', default: false },
         all: { type: 'boolean', default: false },
         'dry-run': { type: 'boolean', default: false },
         'no-auto': { type: 'boolean', default: false },
@@ -137,6 +145,16 @@ export async function main(argv: string[]): Promise<number> {
   if (values.version) {
     process.stdout.write(`${packageVersion()}\n`);
     return EXIT_OK;
+  }
+  if (command === undefined && !values.help && !values.json &&
+      process.stdin.isTTY === true && process.stdout.isTTY === true) {
+    try {
+      const { runMenu } = await import('./menu.ts');
+      return await runMenu({ positionals: [], values: values as Record<string, unknown> });
+    } catch (err) {
+      process.stderr.write(`无法打开菜单：${(err as Error).message}\n`);
+      return EXIT_ENVIRONMENT;
+    }
   }
   if (values.help || command === undefined || command === 'help') {
     // `afc <命令> --help` 打印该命令的用法；否则打印顶层帮助

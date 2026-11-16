@@ -1,6 +1,20 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { readManifest, manifestPath, acquireLock, stateDir } from '../../bindings/store.ts';
+import {
+  inspectParty,
+  verifyBindings,
+  exactDefinitions,
+  currentProfile,
+} from '../../bindings/party.ts';
+import { join } from 'node:path';
+import { listKernelProcesses } from '../../paths.ts';
 import { EXIT_ENVIRONMENT, EXIT_NO_USABLE_NODE, EXIT_OK, EXIT_USAGE } from '../../exit-codes.ts';
 import { UsageError } from '../../errors.ts';
-import { policyForDomain, repairDomains, type DomainRepairIssue } from '../../heal/domain-repair.ts';
+import {
+  policyForDomain,
+  repairDomains,
+  type DomainRepairIssue,
+} from '../../heal/domain-repair.ts';
 import { GroupNotSwitchableError, repairTarget, type RepairOutcome } from '../../heal/repair.ts';
 import { parseDomainPattern, type DomainTargetConfig } from '../../targets/domain.ts';
 import type { ResolvedBinding } from '../../routes/resolver.ts';
@@ -21,32 +35,50 @@ export function resolveFixRequest(
   const positional = context.positionals[0];
   const scheduled = optBoolean(context.values, 'scheduled');
   const force = optBoolean(context.values, 'force');
-  const legacy = typeof context.values['group'] === 'string' ||
-    optBoolean(context.values, 'all') || optBoolean(context.values, 'no-auto');
+  const legacy =
+    typeof context.values['group'] === 'string' ||
+    optBoolean(context.values, 'all') ||
+    optBoolean(context.values, 'no-auto');
 
-  if (positional && legacy) throw new UsageError('域名位置参数不能与 --group/--all/--no-auto 同时使用。');
-  if (scheduled && positional) throw new UsageError('计划任务模式从配置读取域名，不能再提供位置参数。');
+  if (positional && legacy)
+    throw new UsageError('域名位置参数不能与 --group/--all/--no-auto 同时使用。');
+  if (scheduled && positional)
+    throw new UsageError('计划任务模式从配置读取域名，不能再提供位置参数。');
   if (scheduled && legacy) throw new UsageError('计划任务域名模式不能与旧的组选项同时使用。');
   if (scheduled && force) throw new UsageError('计划任务不会使用 --force；强制换点只能手动执行。');
   if (legacy) return { mode: 'legacy', force };
 
+  const configured = positional && optBoolean(context.values, 'menu')
+    ? configuredDomains.find((target) => target.pattern === parseDomainPattern(positional).input)
+    : undefined;
   const targets = positional
-    ? [{ pattern: parseDomainPattern(positional).input, extraProbes: [], countryAllow: [], countryDeny: [] }]
+    ? [
+        configured ?? {
+          pattern: parseDomainPattern(positional).input,
+          extraProbes: [],
+          countryAllow: [],
+          countryDeny: [],
+        },
+      ]
     : configuredDomains;
   return { mode: 'domain', targets, force, scheduled };
 }
 
-export function formatRouteBinding(binding: ResolvedBinding, targets: DomainTargetConfig[]): string {
+export function formatRouteBinding(
+  binding: ResolvedBinding,
+  targets: DomainTargetConfig[],
+): string {
   const lines = [`${binding.pattern} → ${binding.group}`];
   for (const evidence of binding.evidence) {
-    const target = targets.find((candidate) =>
-      parseDomainPattern(candidate.pattern).input === evidence.pattern);
+    const target = targets.find(
+      (candidate) => parseDomainPattern(candidate.pattern).input === evidence.pattern,
+    );
     const policy = target ? policyForDomain(target, evidence.witness) : undefined;
     const confidence = policy?.confidence === 'service' ? '功能已验证' : '只能证明 HTTPS 可达';
     lines.push(
       `  ${evidence.witness}：规则 #${evidence.rule.index + 1} ` +
-      `${evidence.rule.type}${evidence.rule.payload ? `,${evidence.rule.payload}` : ''} → ` +
-      `${evidence.policy}（${confidence}）`,
+        `${evidence.rule.type}${evidence.rule.payload ? `,${evidence.rule.payload}` : ''} → ` +
+        `${evidence.policy}（${confidence}）`,
     );
   }
   return lines.join('\n') + '\n';
@@ -54,8 +86,10 @@ export function formatRouteBinding(binding: ResolvedBinding, targets: DomainTarg
 
 function timestamp(now = new Date()): string {
   const pad = (n: number): string => String(n).padStart(2, '0');
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
-    `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  return (
+    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
+    `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
+  );
 }
 
 export function formatRouteIssue(
@@ -63,9 +97,8 @@ export function formatRouteIssue(
   options: { quiet: boolean; verbose: boolean; now?: Date },
 ): string {
   const subject = issue.group ?? issue.witness ?? issue.pattern ?? '目标';
-  const apiIndex = options.verbose && issue.ruleIndex !== undefined
-    ? ` (API index ${issue.ruleIndex})`
-    : '';
+  const apiIndex =
+    options.verbose && issue.ruleIndex !== undefined ? ` (API index ${issue.ruleIndex})` : '';
   return options.quiet
     ? `${timestamp(options.now)} ${subject}：${issue.reason}${apiIndex}\n`
     : `  ${subject}：${issue.reason}${apiIndex}\n`;
@@ -122,7 +155,9 @@ async function runLegacy(context: CommandContext): Promise<number> {
         force: optBoolean(context.values, 'force'),
         // 过程提示只在终端里显示（管道/日志下不产生噪音）
         onNotice: (message) => {
-          if (!quiet && interactive()) process.stderr.write(`  ${message}\n`);
+          const notice = context.values['on-notice'];
+          if (typeof notice === 'function') notice(message);
+          else if (!quiet && interactive()) process.stderr.write(`  ${message}\n`);
         },
       });
       outcomes.push(outcome);
@@ -142,14 +177,19 @@ async function runLegacy(context: CommandContext): Promise<number> {
       const error = err as Error;
       failures.push({ group: plan.groupName, error });
       if (error instanceof GroupNotSwitchableError) {
-        if (quiet) process.stdout.write(`${timestamp()} ${plan.groupName}: 跳过（组类型不可切换）\n`);
+        if (quiet)
+          process.stdout.write(`${timestamp()} ${plan.groupName}: 跳过（组类型不可切换）\n`);
         else process.stdout.write(`${plan.groupName}：跳过（组类型不可切换）\n`);
         if (verbose) process.stderr.write(`${error.message}\n`);
       } else if (quiet) {
         // 精简模式只把一行摘要写到 stdout（计划任务的日志），
         // 完整错误写到 stderr，保留事后排查所需的细节。
-        process.stdout.write(`${timestamp()} ${plan.groupName}: 执行失败 — ${error.message.split('\n')[0]}\n`);
-        process.stderr.write(`${timestamp()} ${plan.groupName} 执行失败：\n${error.stack ?? error.message}\n`);
+        process.stdout.write(
+          `${timestamp()} ${plan.groupName}: 执行失败 — ${error.message.split('\n')[0]}\n`,
+        );
+        process.stderr.write(
+          `${timestamp()} ${plan.groupName} 执行失败：\n${error.stack ?? error.message}\n`,
+        );
       } else {
         process.stderr.write(`${plan.groupName}：执行失败 — ${error.message}\n`);
       }
@@ -159,7 +199,9 @@ async function runLegacy(context: CommandContext): Promise<number> {
   // 哪些组没被纳入：默认只说个数量，避免刷屏
   if (skippedPlans.length > 0 && !quiet) {
     if (verbose) {
-      process.stdout.write(`\n未处理的组：\n${skippedPlans.map((s) => `  ${s.groupName}：${s.reason}`).join('\n')}\n`);
+      process.stdout.write(
+        `\n未处理的组：\n${skippedPlans.map((s) => `  ${s.groupName}：${s.reason}`).join('\n')}\n`,
+      );
     } else {
       process.stdout.write(`\n另有 ${skippedPlans.length} 个组未纳入（--verbose 查看原因）。\n`);
     }
@@ -176,7 +218,7 @@ async function runLegacy(context: CommandContext): Promise<number> {
   return EXIT_OK;
 }
 
-export async function run(context: CommandContext): Promise<number> {
+async function runInternal(context: CommandContext): Promise<number> {
   // 先做纯参数校验，错误组合不能为了报用法错误而触发控制器发现。
   const shape = resolveFixRequest(context, []);
   if (shape.mode === 'legacy') return await runLegacy(context);
@@ -194,7 +236,39 @@ export async function run(context: CommandContext): Promise<number> {
   }
 
   const runtimeRules = loadRuntimeRuleMetadata(runtime.config.probe.runtimeConfigPath);
+  const allBindings = readManifest().bindings;
+  let bindingOptions = {};
+  const endpoint = runtime.controller.endpoint;
+  const localParty =
+    allBindings.length > 0 &&
+    endpoint.kind === 'unix' &&
+    listKernelProcesses().some(
+      (p) => p.unixSocket === endpoint.path && /Clash Party|mihomo-party/i.test(p.command),
+    );
+  if (allBindings.length && localParty) {
+    const party = await inspectParty(runtime);
+    const entries = allBindings.filter((b) => b.root === party.root && b.profile === party.profile);
+    if (entries.length) {
+      const runtimeSnapshot = readFileSync(party.runtimePath, 'utf8');
+      const verify = async (): Promise<void> => {
+        if (readFileSync(party.runtimePath, 'utf8') !== runtimeSnapshot)
+          throw new Error('探测期间运行配置发生变化，取消修复');
+        if (currentProfile(party.root) !== party.profile)
+          throw new Error('当前订阅已变化，取消修复');
+        const [rules, proxies] = await Promise.all([party.client.rules(), party.client.proxies()]);
+        verifyBindings(entries, rules, proxies);
+      };
+      await verify();
+      bindingOptions = {
+        explicitGroups: new Set(entries.map((b) => b.group)),
+        bindingTargets: entries.map((b) => ({ group: b.group, target: b.target })),
+        inlineProxies: exactDefinitions(party),
+        beforeSelect: verify,
+      };
+    }
+  }
   const report = await repairDomains({
+    ...bindingOptions,
     config: runtime.config,
     targets: request.targets,
     client: runtime.controller.client,
@@ -202,7 +276,9 @@ export async function run(context: CommandContext): Promise<number> {
     dryRun,
     ...(runtimeRules ? { runtimeRules: runtimeRules.rules } : {}),
     onNotice: (message) => {
-      if (!quiet && interactive()) process.stderr.write(`  ${message}\n`);
+      const notice = context.values['on-notice'];
+      if (typeof notice === 'function') notice(message);
+      else if (!quiet && interactive()) process.stderr.write(`  ${message}\n`);
     },
   });
 
@@ -219,8 +295,14 @@ export async function run(context: CommandContext): Promise<number> {
   }
   if (report.issues.length > 0) {
     const sections = [
-      { heading: '已跳过的路由', issues: report.issues.filter((issue) => issue.kind === 'policy-skipped') },
-      { heading: '无法完整解析的路由', issues: report.issues.filter((issue) => issue.kind !== 'policy-skipped') },
+      {
+        heading: '已跳过的路由',
+        issues: report.issues.filter((issue) => issue.kind === 'policy-skipped'),
+      },
+      {
+        heading: '无法完整解析的路由',
+        issues: report.issues.filter((issue) => issue.kind !== 'policy-skipped'),
+      },
     ];
     for (const section of sections) {
       if (section.issues.length === 0) continue;
@@ -230,5 +312,22 @@ export async function run(context: CommandContext): Promise<number> {
       }
     }
   }
+  if (report.issues.some((i) => i.kind === 'unresolved-rule'))
+    process.stderr.write(
+      optBoolean(context.values, 'menu')
+        ? '可返回网站菜单，选择“绑定代理组”。保存需先手动退出 Clash Party。\n'
+        : "可手动绑定：afc bind '<域名范围>' --group '<已有组名>' --restart-client；新建组再加 --create。\n",
+    );
   return report.exitCode;
+}
+
+export async function run(context: CommandContext): Promise<number> {
+  const release = acquireLock();
+  try {
+    if (existsSync(join(stateDir(), 'binding-transaction.json')))
+      throw new Error('有未完成的绑定事务，请先执行 bind 恢复');
+    return await runInternal(context);
+  } finally {
+    release();
+  }
 }

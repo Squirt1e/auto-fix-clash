@@ -104,3 +104,12 @@ test('选择竞争会被明确报告为未覆盖用户操作', () => {
   assert.match(text, /选择已变化/);
   assert.match(text, /USER-CHOICE/);
 });
+
+test('binding evidence is checked again before selection and can cancel switching',async()=>{
+ const {client,selections}=fakeClient();
+ await assert.rejects(repairGroup({config:loadConfig(),groupName:'GPT',policies:[policy()],client,
+  inlineProxies:[{name:'A'},{name:'B'}],force:true,engineFactory:async()=>fakeEngine(ok('B')),
+  beforeSelect:async()=>{throw new Error('profile changed');},
+ }),/profile changed/);
+ assert.deepEqual(selections,[]);
+});
