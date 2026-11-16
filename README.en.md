@@ -17,54 +17,44 @@ country-blocked.
 
 - Codex or ChatGPT suddenly stops working and you end up trying nodes one by one in Clash
 - The lowest-latency nodes (Hong Kong, 400ms) are exactly the unusable ones; the US node that works takes 900ms
-- The node labelled “Hong Kong 20” exits in Japan, and yesterday's good node is dead today
+- The node labelled “Hong Kong” actually exits in Japan, and yesterday's good node is dead today
 
-## Install and use
+## Install
 
 ```bash
-npm i -g auto-fix-clash            # Node.js >= 20
-afc                              # open the menu: groups / websites / timer / settings
-afc fix '*.chatgpt.com'            # repair now (quote the * so your shell keeps it)
-afc schedule install               # then re-check every 5 minutes
-afc schedule add '*.example.com'   # manage another site: register its scope
-afc schedule list                  # list registered scopes
+npm i -g auto-fix-clash   # Node.js >= 20
+afc                       # open the menu
 ```
 
-For everyday use, run `afc`: use ↑↓ to select, ← to go back, and → or Enter to confirm a menu option. Left and right arrows still move the cursor in text inputs. The menu uses a separate screen for the current page, preserves selections and searches when you return, and restores your terminal on exit. Use PgUp/PgDn for long results; type to filter lists and press Tab to switch between the search field and menu options. The menu can inspect, probe and repair groups, add websites, and manage bindings and scheduled repairs. For binding changes, you exit and start Clash Party manually; the menu never restarts the client. Offline saves are marked as awaiting activation checks. The existing commands remain available through `afc --help`; pipes and scripts do not open the menu. Menu labels and messages are in Chinese.
+## Usage
 
-`*.` includes the **apex domain itself** and every subdomain level. To stop: `afc schedule uninstall`.
+Run `afc` to open the menu: 代理组 (repair / probe / list nodes), 网站 (add, repair, bind, timer), 定时
+(on/off and interval) and 设置 (client connection, probe settings). ↑↓ select, Enter confirm, ← back,
+Ctrl+C exit; pipes and scripts get plain output instead of the menu. Binding and unbinding from the menu
+require you to quit and restart Clash Party yourself — the menu never restarts the client.
 
-## Output and commands
+Commands for scripts:
+
+| Command | Purpose |
+|---|---|
+| `afc fix '<domain>'` | resolve the route and switch the site to a usable node (`--force` rotates anyway, `--dry-run` previews) |
+| `afc schedule add`·`list`·`remove` | manage the domain scopes used by the timer (`add` accepts `--url` / `--expect`) |
+| `afc schedule install`·`status`·`uninstall` | install / inspect / remove the scheduled task (default every 300s) |
+| `afc bind`·`unbind`·`--list` | bind / unbind / inspect domain bindings (`--restart-client` allows a brief restart) |
+| `afc groups` / `afc doctor` | list groups / probe nodes per group |
+
+Binding supports macOS Clash Party with inline node definitions and applies to the current subscription
+only, e.g. `afc bind '*.chatgpt.com' --group 'my-group' --restart-client` (`--create` makes a new group);
+choose `afc fix` afterwards or wait for the timer, and unbinding keeps created groups. `*.chatgpt.com`
+covers the apex and every subdomain; `afc --help` and `afc <command> --help` list every option.
+
+## Output
 
 The CLI reports in Chinese: a `*.chatgpt.com → GPT` header, then one `规则 #N <TYPE>,<payload> → <group>`
 evidence line per witness host, then the outcome line. `规则 #N` is the human-facing one-based rule number
 (`--verbose` adds `(API index N-1)` for the control API). While the current node is healthy nothing is
-changed and only that node is probed (~2s); `--force` rotates anyway.
-
-| Command | Purpose |
-|---|---|
-| `afc fix '<domain>'` / `--force` / `--dry-run` | resolve the route and repair / rotate anyway / preview only |
-| `afc schedule add`·`list`·`remove` | manage the domain scopes used by the timer |
-| `afc schedule install`·`uninstall`·`status` | install / remove / inspect the scheduled task |
-| `afc groups` / `afc doctor` | list proxy groups / probe every node (group-based, no domain argument) |
-
-Add `--help` to any command. The legacy group-based mode (`afc add`, `afc fix --group/--all`) is still available.
-
-## Bind a domain when route resolution fails
-
-Binding initially supports **macOS Clash Party with inline node definitions**:
-
-```bash
-afc bind '*.chatgpt.com' --group 'GPT' --restart-client
-afc bind '*.chatgpt.com' --group 'AFC-AI' --create --restart-client
-afc fix '*.chatgpt.com'
-```
-
-For manual lifecycle control, exit Party yourself, then use `--offline --client-dir <Party data directory>` instead of `--restart-client`. AFC refuses offline writes while Party is running. Start Party yourself and verify with `afc bind --list`; offline saving does not prove activation.
-
-The current subscription receives persistent overrides and leading domain rules. `--restart-client` permits a brief client restart, interrupting proxy connections. Use `--dry-run` to preview, `--replace` to change a binding or its probe policy, and `afc bind --list` to inspect bindings. Names are exact, not group indices. New groups automatically collect inline nodes after subscription updates.
-
-`afc unbind '*.chatgpt.com' --restart-client` removes the binding, retaining created groups to protect external references. Existing groups retain their members and selection. Binding does not run repair or register a scheduled target. All probe policies of domains sharing a group constrain future repairs.
+changed and only that node is probed (~2s); `--force` rotates anyway. Examples in this document are
+anonymized.
 
 ## Behaviour and limits
 
@@ -82,7 +72,7 @@ The current subscription receives persistent overrides and leading domain rules.
 
 Optional. Lookup order: `--config <path>` → `./afc.config.yaml` → `~/.config/afc/config.yaml`.
 See [`afc.config.yaml`](afc.config.yaml) for every field and default; `domains: []` disables all
-scheduled domains explicitly.
+scheduled domains explicitly. Settings changed in the menu are written back to the same file.
 
 ## Requirements and troubleshooting
 
