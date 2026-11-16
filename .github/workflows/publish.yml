@@ -60,7 +60,9 @@ jobs:
               echo "--- 断言细节 ---"
               grep -B1 -A6 'AssertionError\|Error:' test-output.log | head -50
             } > failure-summary.txt
-            msg=$(head -c 3500 failure-summary.txt | sed ':a;N;$!ba;s/\n/%0A/g')
+            # BSD sed（macOS runner）不认 GNU 的 `:a;N;$!ba` 写法，会整条失败、
+            # 结果是 macOS 上的失败注解一直是空的。改用 node 转义换行。
+            msg=$(node -e 'let s=require("fs").readFileSync("failure-summary.txt","utf8").slice(0,3500);process.stdout.write(s.replace(/\n/g,"%0A"))')
             echo "::error title=${{ matrix.os }} 测试失败::$msg"
             exit "$code"
           fi
