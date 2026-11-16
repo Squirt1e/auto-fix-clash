@@ -188,7 +188,7 @@ import { findKernelBinary } from '../src/paths.ts';
 test(
   'offline snapshot reads explicit profile and rejects any running Party process',
   { skip: process.platform !== 'darwin' },
-  () =>
+  (t) =>
     fixture((root) => {
       writeFileSync(join(root, 'config.yaml'), 'diffWorkDir: false\n');
       mkdirSync(join(root, 'work'));
@@ -208,12 +208,19 @@ test(
           ]),
         /仍在运行/,
       );
-      if (process.platform === 'darwin') {
-        const snapshot = inspectOfflineParty(root, findKernelBinary(), []);
-        assert.equal(snapshot.party.profile, 'id');
-        assert.equal(snapshot.proxies.Existing?.type, 'Selector');
-        assert.deepEqual(snapshot.proxies.Existing?.all, ['node']);
+      // 转快照要真起一次内核。干净的 macOS CI runner 上没装 Clash，
+      // 这一段只能跳过；「拒绝运行中的客户端」那条断言不依赖内核，照常执行。
+      let kernel: string | undefined;
+      try {
+        kernel = findKernelBinary();
+      } catch {
+        t.diagnostic('跳过快照断言：本机没有 mihomo 内核（CI runner 就是这种情况）');
+        return;
       }
+      const snapshot = inspectOfflineParty(root, kernel, []);
+      assert.equal(snapshot.party.profile, 'id');
+      assert.equal(snapshot.proxies.Existing?.type, 'Selector');
+      assert.deepEqual(snapshot.proxies.Existing?.all, ['node']);
     }),
 );
 
